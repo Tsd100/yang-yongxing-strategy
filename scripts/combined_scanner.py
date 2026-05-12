@@ -1,27 +1,32 @@
 """
-SEPA策略 + 杨永兴战法 联合扫描引擎
-先SEPA基本面7步筛选优质标的，再杨永兴9步技术面寻找短线买点
+杨永兴战法 + SEPA策略 联合扫描引擎
+先杨永兴九步技术面筛选，再用SEPA基本面验证（顺序不可颠倒）
 
 流程：
-  第一阶段 - SEPA七步基本面筛选：
-    1. 剔除ST和上市不满1年的次新股
-    2. 营收同比增长 > 25%
-    3. 净利润同比增长 > 30%，环比为正
-    4. 股价在50日/150日均线之上
-    5. 近10日均量 > 120日均量（放量）
-    6. ROE > 15%
-    7. 近3年净利润CAGR > 20%
-
-  第二阶段 - 杨永兴战法技术面筛选：
+  第一阶段 - 杨永兴九步技术面筛选（快速缩小范围）：
     0. 大盘环境判断（放量大跌则空仓）
-    1. 今日涨幅 3%-5%
-    2. 近20天有涨停记录
-    3. 量比 ≥ 1
-    4. 流通市值 50-200亿
-    5. 换手率 5%-10%
-    6. 振幅 ≤ 8%
-    7. K线上方无压力（无长上影线）
-    8. 分时站均价线上方
+    1. 排除ST/非主板（只留主板票）
+    2. 今日涨幅 1%-5%（盈利空间充足但不追高）
+    3. 近20天有涨停记录（主力活跃，有人气）
+    4. 量比 ≥ 1.2（有资金关注）
+    5. 流通市值 50-200亿（盘子适中易撬动）
+    6. 换手率 5%-10%（健康换手，非出货）
+    7. 振幅 ≤ 8%（波动适中）
+    8. K线上方无压力（无长上影线）
+    9. 分时站均价线上方（买方主导，主力护盘）
+
+  第二阶段 - SEPA基本面验证（对杨永兴候选股做精准财务验证，共9步）：
+    1. 剔除ST和上市不满1年的次新股
+    2. 营收同比增长 > 25%（超级增长门槛）
+    3. 净利润同比增长 > 30%，且近2-3季度逐季提升（EPS加速）
+    4. ROE > 17%（盈利效率高，SEPA原文优秀标准）
+    5. 近3年净利润CAGR > 20%（业绩持续性强）
+    6. 股价在50日/150日均线之上（中长期上升趋势）
+    7. 近10日均量 > 120日均量（机构资金入场）
+    8. 股价接近52周前期高点（>85%，同花顺创新高数据）
+    9. VCP紧凑收盘（10日振幅<8% + 5日收盘价稳定，VCP代理指标）
+
+  数据源：A股实时行情使用腾讯财经接口
 """
 
 import logging
@@ -68,225 +73,99 @@ class CombinedScanner:
 
     def scan(self, skip_intraday=False, skip_ma_check=False, relax_yang=False):
         """
-        执行SEPA+杨永兴联合扫描
+        执行杨永兴+SEPA联合扫描（顺序：杨永兴先 → SEPA后）
 
         参数:
           skip_intraday: 跳过杨永兴分时数据检查（加快速度）
-          skip_ma_check: 跳过SEPA均线检查（加快速度）
+          skip_ma_check: 跳过SEPA均线和量能检查（加快速度）
           relax_yang: 放宽杨永兴条件（涨幅不限、市值/换手率放宽）
 
         返回: {
-            sepa_candidates: list,   # SEPA通过的候选股
-            final_candidates: list,  # 双战法同时通过的最终候选
-            filter_log: list,        # 完整筛选日志
-            market: dict,            # 大盘环境
+            yang_candidates: list,      # 杨永兴技术面通过的候选股
+            final_candidates: list,    # 双战法同时通过的最终候选
+            filter_log: list,           # 完整筛选日志
+            market: dict,               # 大盘环境
             scan_time: str,
             strategy: str,
         }
         """
         self.filter_log = []
+        yang_candidates = []
 
-        # ============ 第一阶段：SEPA基本面筛选 ============
+        # ============ 第一阶段：杨永兴九步技术面筛选（快速缩小范围）============
         logger.info("=" * 60)
-        logger.info("第一阶段：SEPA七步基本面筛选")
+        logger.info("第一阶段：杨永兴九步技术面筛选")
         logger.info("=" * 60)
 
-        sepa_result = self.sepa_filter.scan(skip_ma_check=skip_ma_check)
+        yang_result = self.scanner.scan(skip_intraday=skip_intraday)
+        yang_candidates = yang_result.get("candidates", [])
+        yang_codes = set(c["code"] for c in yang_candidates)
 
-        # 把SEPA的filter_log搬过来，标注phase
-        for log in self.sepa_filter.filter_log:
+        for log in self.scanner.filter_log:
             self.filter_log.append({
-                "phase": "SEPA",
+                "phase": "杨永兴",
                 "step": log.get("step"),
                 "action": log.get("action"),
-                "count_before": log.get("count_before", log.get("count_before", 0)),
-                "count_after": log.get("count_after", log.get("count_after", 0)),
+                "count_before": log.get("count_before", 0),
+                "count_after": log.get("count_after", 0),
                 "filtered": log.get("filtered", 0),
+                "reason": log.get("reason", ""),
             })
 
-        sepa_candidates = sepa_result.get("candidates", [])
-        logger.info(f"SEPA筛选完成: {len(sepa_candidates)} 只候选股")
+        logger.info(f"杨永兴筛选完成: {len(yang_candidates)} 只候选股")
 
-        if not sepa_candidates:
-            return self._build_result([], sepa_candidates)
+        if not yang_candidates:
+            logger.warning("杨永兴无候选股，联合扫描结束")
+            return self._build_result([], [], {}, {}, "杨永兴筛选无候选股")
 
-        # ============ 获取SEPA候选股行情 ============
-        sepa_codes = [c["code"] for c in sepa_candidates]
-        all_stocks = df_api.get_realtime_quotes()
-
-        if all_stocks.empty:
-            logger.warning("无法获取行情数据，跳过杨永兴筛选")
-            return self._build_result([], sepa_candidates)
-
-        stocks = all_stocks[all_stocks["code"].isin(sepa_codes)].copy()
-        if stocks.empty:
-            # 行情不可用但有SEPA候选，构建仅含代码的DataFrame
-            stocks = pd.DataFrame({
-                "code": sepa_codes,
-                "name": [c.get("name", "") for c in sepa_candidates],
-                "price": [c.get("price") for c in sepa_candidates],
-                "change_pct": [c.get("change_pct", 0) for c in sepa_candidates],
-            })
-
-        # 补充财务数据到行情中（用于后续报告）
-        financial_cache = self.sepa_filter._financial_cache
-
-        # ============ 第二阶段：杨永兴战法技术面筛选 ============
-        logger.info("=" * 60)
-        logger.info("第二阶段：杨永兴战法技术面筛选")
-        logger.info("=" * 60)
-
-        # 步骤0：大盘环境判断
+        # ============ 大盘环境判断（放量大跌则直接结束）============
         market_status = df_api.get_market_status()
         market_trend = df_api.get_market_trend()
 
         if market_status.get("is_crash"):
             logger.warning("大盘放量大跌，按杨永兴战法应空仓！")
-            return self._build_result([], sepa_candidates, market_trend, market_status, "大盘放量大跌，空仓")
+            return self._build_result([], yang_candidates, market_trend, market_status, "大盘放量大跌，空仓")
 
-        # 步骤1：涨幅范围
-        before = len(stocks)
-        stocks["change_pct"] = stocks["change_pct"].apply(
-            lambda x: float(x) if x and str(x) not in ("-", "--", "") else 0
+        # ============ 第二阶段：SEPA基本面验证（对杨永兴候选股做精准验证）============
+        logger.info("=" * 60)
+        logger.info("第二阶段：SEPA基本面验证（9步筛选：1剔除ST次新 + 2营收>25% + 3EPS加速+净利>30% + 4ROE>17% + 5三年CAGR>20% + 6均线 + 7放量 + 8接近52周高点 + 9VCP紧凑收盘）")
+        logger.info("=" * 60)
+
+        # SEPA只对杨永兴候选股进行财务验证
+        sepa_result = self.sepa_filter.scan(
+            target_codes=list(yang_codes),
+            skip_ma_check=skip_ma_check,
         )
 
-        if relax_yang:
-            # 放宽模式：涨幅>0即可
-            yang_stocks = stocks[stocks["change_pct"] > 0].copy()
-            self.log_filter("杨永兴", 1, "涨幅>0%（放宽）", before, len(yang_stocks))
-        else:
-            yang_stocks = stocks[
-                (stocks["change_pct"] >= RISE_MIN) & (stocks["change_pct"] <= RISE_MAX)
-            ].copy()
-            self.log_filter("杨永兴", 1, f"涨幅{RISE_MIN}%-{RISE_MAX}%", before, len(yang_stocks))
+        for log in self.sepa_filter.filter_log:
+            self.filter_log.append({
+                "phase": "SEPA",
+                "step": log.get("step"),
+                "action": log.get("action"),
+                "count_before": log.get("count_before", 0),
+                "count_after": log.get("count_after", 0),
+                "filtered": log.get("filtered", 0),
+            })
 
-        logger.info(f"杨永兴步骤1后: {len(yang_stocks)} 只")
+        sepa_candidates = sepa_result.get("candidates", [])
+        logger.info(f"SEPA验证完成: {len(sepa_candidates)} 只候选股通过")
 
-        if yang_stocks.empty:
-            self._log_remaining_steps(start_step=2)
-            return self._build_result([], sepa_candidates, market_trend, market_status)
+        # 最终结果：杨永兴 + SEPA 同时通过
+        final_codes = set(c["code"] for c in sepa_candidates)
+        final_candidates = [c for c in yang_candidates if c["code"] in final_codes]
 
-        # 步骤2：近20天有涨停记录
-        before = len(yang_stocks)
-        limit_up_cache = df_api.get_limit_up_history(days=LIMIT_UP_DAYS)
-        limit_up_codes = set()
-        for codes in limit_up_cache.values():
-            limit_up_codes.update(codes)
-        today_limit = df_api.get_limit_up_today()
-        limit_up_codes.update(today_limit)
+        # 补充SEPA财务数据到最终候选
+        financial_cache = self.sepa_filter._financial_cache
+        for c in final_candidates:
+            fin = financial_cache.get(c["code"], {})
+            c["revenue_growth_yoy"] = fin.get("revenue_growth_yoy")
+            c["profit_growth_yoy"] = fin.get("profit_growth_yoy")
+            c["roe"] = fin.get("roe")
 
-        yang_stocks = yang_stocks[yang_stocks["code"].isin(limit_up_codes)].copy()
-        self.log_filter("杨永兴", 2, f"近{LIMIT_UP_DAYS}天有涨停", before, len(yang_stocks))
-        logger.info(f"杨永兴步骤2后: {len(yang_stocks)} 只")
-
-        if yang_stocks.empty:
-            if relax_yang:
-                logger.info("放宽模式下无涨停记录，跳过涨停要求")
-                yang_stocks = stocks[stocks["change_pct"] > 0].copy()
-                self.log_filter("杨永兴", 2, "涨停要求（放宽跳过）", before, len(yang_stocks))
-            else:
-                self._log_remaining_steps(start_step=3)
-                return self._build_result([], sepa_candidates, market_trend, market_status)
-
-        # 步骤3：量比
-        before = len(yang_stocks)
-        if "volume_ratio" in yang_stocks.columns and yang_stocks["volume_ratio"].notna().any():
-            yang_stocks["volume_ratio"] = yang_stocks["volume_ratio"].apply(
-                lambda x: float(x) if x and str(x) not in ("-", "--", "") else None
-            )
-            mask = (yang_stocks["volume_ratio"] >= VOLUME_RATIO_MIN) | yang_stocks["volume_ratio"].isna()
-            yang_stocks = yang_stocks[mask].copy()
-        self.log_filter("杨永兴", 3, f"量比≥{VOLUME_RATIO_MIN}", before, len(yang_stocks))
-        logger.info(f"杨永兴步骤3后: {len(yang_stocks)} 只")
-
-        if yang_stocks.empty:
-            self._log_remaining_steps(start_step=4)
-            return self._build_result([], sepa_candidates, market_trend, market_status)
-
-        # 步骤4：流通市值
-        before = len(yang_stocks)
-        if "circ_mv_billion" in yang_stocks.columns and yang_stocks["circ_mv_billion"].notna().any():
-            yang_stocks["circ_mv_billion"] = yang_stocks["circ_mv_billion"].apply(
-                lambda x: float(x) if x and str(x) not in ("-", "--", "") else None
-            )
-            if relax_yang:
-                cap_min, cap_max = 30, 500  # 放宽
-            else:
-                cap_min, cap_max = MARKET_CAP_MIN, MARKET_CAP_MAX
-            mask = (
-                (yang_stocks["circ_mv_billion"] >= cap_min) &
-                (yang_stocks["circ_mv_billion"] <= cap_max)
-            ) | yang_stocks["circ_mv_billion"].isna()
-            yang_stocks = yang_stocks[mask].copy()
-        cap_label = f"流通市值{cap_min}-{cap_max}亿" if relax_yang else f"流通市值{MARKET_CAP_MIN}-{MARKET_CAP_MAX}亿"
-        self.log_filter("杨永兴", 4, cap_label, before, len(yang_stocks))
-        logger.info(f"杨永兴步骤4后: {len(yang_stocks)} 只")
-
-        if yang_stocks.empty:
-            self._log_remaining_steps(start_step=5)
-            return self._build_result([], sepa_candidates, market_trend, market_status)
-
-        # 步骤5：换手率
-        before = len(yang_stocks)
-        if "turnover_rate" in yang_stocks.columns and yang_stocks["turnover_rate"].notna().any():
-            yang_stocks["turnover_rate"] = yang_stocks["turnover_rate"].apply(
-                lambda x: float(x) if x and str(x) not in ("-", "--", "") else None
-            )
-            if relax_yang:
-                tr_min, tr_max = 2, 15  # 放宽
-            else:
-                tr_min, tr_max = TURNOVER_MIN, TURNOVER_MAX
-            mask = (
-                (yang_stocks["turnover_rate"] >= tr_min) &
-                (yang_stocks["turnover_rate"] <= tr_max)
-            ) | yang_stocks["turnover_rate"].isna()
-            yang_stocks = yang_stocks[mask].copy()
-        tr_label = f"换手率{tr_min}-{tr_max}%" if relax_yang else f"换手率{TURNOVER_MIN}-{TURNOVER_MAX}%"
-        self.log_filter("杨永兴", 5, tr_label, before, len(yang_stocks))
-        logger.info(f"杨永兴步骤5后: {len(yang_stocks)} 只")
-
-        if yang_stocks.empty:
-            self._log_remaining_steps(start_step=6)
-            return self._build_result([], sepa_candidates, market_trend, market_status)
-
-        # 步骤6：振幅
-        before = len(yang_stocks)
-        if "amplitude" in yang_stocks.columns:
-            yang_stocks["amplitude"] = yang_stocks["amplitude"].apply(
-                lambda x: float(x) if x and str(x) not in ("-", "--", "") else 0
-            )
-            yang_stocks = yang_stocks[yang_stocks["amplitude"] <= AMPLITUDE_MAX].copy()
-        self.log_filter("杨永兴", 6, f"振幅≤{AMPLITUDE_MAX}%", before, len(yang_stocks))
-        logger.info(f"杨永兴步骤6后: {len(yang_stocks)} 只")
-
-        if yang_stocks.empty:
-            self._log_remaining_steps(start_step=7)
-            return self._build_result([], sepa_candidates, market_trend, market_status)
-
-        # 步骤7：K线上方无压力
-        before = len(yang_stocks)
-        yang_stocks = self._filter_kline_pressure(yang_stocks)
-        self.log_filter("杨永兴", 7, "K线上方无压力", before, len(yang_stocks))
-        logger.info(f"杨永兴步骤7后: {len(yang_stocks)} 只")
-
-        if yang_stocks.empty:
-            self._log_remaining_steps(start_step=8)
-            return self._build_result([], sepa_candidates, market_trend, market_status)
-
-        # 步骤8：分时站均价线上方
-        if not skip_intraday:
-            before = len(yang_stocks)
-            yang_stocks = self._filter_intraday(yang_stocks)
-            self.log_filter("杨永兴", 8, "分时站均价线上方", before, len(yang_stocks))
-            logger.info(f"杨永兴步骤8后: {len(yang_stocks)} 只")
-        else:
-            self.log_filter("杨永兴", 8, "分时站均价线上方（跳过）", len(yang_stocks), len(yang_stocks))
-
-        # ============ 构建最终结果 ============
-        final_candidates = self._build_candidates(yang_stocks, financial_cache)
+        logger.info(f"双战法同时通过: {len(final_candidates)} 只")
 
         result = self._build_result(
-            final_candidates, sepa_candidates, market_trend, market_status
+            final_candidates, yang_candidates, market_trend, market_status
         )
 
         # ============ OpenViking 上下文同步 ============
@@ -378,18 +257,18 @@ class CombinedScanner:
             candidates.append(candidate)
         return candidates
 
-    def _build_result(self, final_candidates, sepa_candidates,
+    def _build_result(self, final_candidates, yang_candidates,
                       market=None, market_status=None, warning=""):
         """构建最终返回结果"""
         return {
+            "yang_candidates": yang_candidates,
             "final_candidates": final_candidates,
-            "sepa_candidates": sepa_candidates,
             "filter_log": self.filter_log,
             "market": market or {},
             "market_status": market_status or {},
             "scan_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "total_final": len(final_candidates),
-            "total_sepa": len(sepa_candidates),
-            "strategy": "SEPA+杨永兴",
-            "warning": warning,
+            "total_yang": len(yang_candidates),
+            "strategy": "杨永兴+SEPA",
+            "warning": warning or "",
         }

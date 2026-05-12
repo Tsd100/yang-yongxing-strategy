@@ -4,8 +4,9 @@
 
 # ============ 选股过滤参数 ============
 
-# 涨幅范围（收盘涨跌幅）
-RISE_MIN = 3.0  # %
+# 涨幅范围（尾盘涨幅榜起始）
+# 杨永兴原文：下午一点半查看涨幅排行榜，范围从1%以上开始
+RISE_MIN = 1.0  # %
 RISE_MAX = 5.0  # %
 
 # 流通市值范围（亿元）
@@ -17,7 +18,8 @@ TURNOVER_MIN = 5.0  # %
 TURNOVER_MAX = 10.0  # %
 
 # 量比最低要求
-VOLUME_RATIO_MIN = 1.0
+# 杨永兴原文：量比≥1.2，最好1-5倍
+VOLUME_RATIO_MIN = 1.2
 
 # 振幅上限（超过则风险偏高）
 AMPLITUDE_MAX = 8.0  # %
@@ -53,7 +55,9 @@ SEPA_REVENUE_GROWTH_MIN = 25.0
 SEPA_PROFIT_GROWTH_MIN = 30.0
 
 # ROE最低要求（%）
-SEPA_ROE_MIN = 15.0
+# SEPA原文：>17%（年化/TTM口径）
+# A股实战：akshare同花顺年报ROE，10%已是优质公司门槛
+SEPA_ROE_MIN = 10.0
 
 # 近3年净利润复合增长率最低要求（%）
 SEPA_PROFIT_CAGR_MIN = 20.0

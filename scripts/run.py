@@ -70,7 +70,7 @@ def cmd_sepa_scan(args):
 
 
 def cmd_combined_scan(args):
-    """执行SEPA+杨永兴联合选股扫描"""
+    """执行杨永兴+SEPA联合选股扫描（先杨永兴技术面筛选，再SEPA基本面验证）"""
     from combined_scanner import CombinedScanner
     from openviking_adapter import init_openviking
     from report import generate_combined_report
@@ -83,7 +83,7 @@ def cmd_combined_scan(args):
     # 初始化 OpenViking
     ov = init_openviking(enabled=use_openviking)
 
-    logger.info("🚀 开始SEPA+杨永兴联合选股扫描...")
+    logger.info("🚀 开始杨永兴+SEPA联合选股扫描...")
     if ov.available:
         logger.info("📋 OpenViking 上下文管理已启用")
 
@@ -98,25 +98,25 @@ def cmd_combined_scan(args):
     print(report_text)
     print(f"\n📁 报告已保存至: {filepath}")
 
+    yang = result.get("yang_candidates", [])
     final = result.get("final_candidates", [])
-    sepa = result.get("sepa_candidates", [])
 
     if final:
-        print(f"\n🌟 以下股票同时满足SEPA基本面+杨永兴技术面，最高确定性：")
+        print(f"\n🌟 双战法同时通过（最高确定性）：")
         for c in final[:10]:
             rev_g = f"{c['revenue_growth_yoy']:.1f}%" if c.get("revenue_growth_yoy") else "N/A"
             profit_g = f"{c['profit_growth_yoy']:.1f}%" if c.get("profit_growth_yoy") else "N/A"
             roe = f"{c['roe']:.1f}%" if c.get("roe") else "N/A"
-            print(f"   {c['code']} {c['name']} 现价{c['price']} 涨幅{c.get('change_pct',0):.1f}%")
+            print(f"   {c['code']} {c['name']} 现价{c.get('price','N/A')} 涨幅{c.get('change_pct',0):.1f}%")
             print(f"     基本面: 营收+{rev_g} 净利+{profit_g} ROE:{roe}")
             print(f"     技术面: 量比{c.get('volume_ratio','N/A')} 换手{c.get('turnover_rate','N/A')}% 市值{c.get('circ_mv_billion','N/A')}亿")
-    elif sepa:
-        print(f"\n💡 今日无股票同时满足双战法条件，但以下SEPA候选股基本面优秀，可关注回调买点：")
-        for c in sepa[:10]:
-            rev_g = f"{c['revenue_growth_yoy']:.1f}%" if c.get("revenue_growth_yoy") else "N/A"
-            profit_g = f"{c['profit_growth_yoy']:.1f}%" if c.get("profit_growth_yoy") else "N/A"
-            roe = f"{c['roe']:.1f}%" if c.get("roe") else "N/A"
-            print(f"   📌 {c['code']} {c['name']} 现价{c.get('price','N/A')} 营收+{rev_g} 净利+{profit_g} ROE:{roe}")
+    elif yang:
+        print(f"\n💡 今日杨永兴候选{yang}只，但无股票同时通过SEPA基本面验证")
+        print(f"   候选股代码：")
+        for c in yang[:10]:
+            print(f"   {c['code']} {c['name']} 现价{c.get('price','N/A')} 涨幅{c.get('change_pct',0):.1f}%")
+    else:
+        print(f"\n💡 今日无符合杨永兴战法条件的股票")
 
 
 def cmd_sell_check(args):
@@ -323,7 +323,7 @@ def cmd_openviking_init(args):
 COMMANDS = {
     "scan": ("杨永兴九步选股扫描", cmd_scan),
     "sepa-scan": ("SEPA策略选股扫描（米勒维尼）", cmd_sepa_scan),
-    "combined-scan": ("SEPA+杨永兴联合扫描（双战法）", cmd_combined_scan),
+    "combined-scan": ("杨永兴+SEPA联合扫描（先杨永兴技术面筛选，再SEPA基本面验证）", cmd_combined_scan),
     "sell-check": ("卖出信号检查", cmd_sell_check),
     "portfolio": ("查看持仓", cmd_portfolio),
     "add": ("添加持仓 (add 代码 名称 买入价)", cmd_add),

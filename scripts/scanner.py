@@ -1,15 +1,16 @@
 """
 杨永兴短线战法 - 核心筛选引擎
 九步过滤法：
-1. 大盘环境判断
-2. 涨幅范围 3%-5%
-3. 近20天有涨停记录
-4. 量比 ≥ 1
-5. 流通市值 50-200亿
-6. 换手率 5%-10%
-7. 成交量温和放大
-8. K线形态上方无压力
-9. 分时全天站均价线上方
+0. 大盘环境判断（放量大跌则空仓）
+1. 排除ST/非主板（只留主板票）
+2. 今日涨幅 1%-5%（盈利空间充足但不追高）
+3. 近20天有涨停记录（主力活跃，有人气）
+4. 量比 ≥ 1.2（有资金关注）
+5. 流通市值 50-200亿（盘子适中易撬动）
+6. 换手率 5%-10%（健康换手，非出货）
+7. 振幅 ≤ 8%（波动适中）
+8. K线上方无压力（无长上影线）
+9. 分时全天站均价线上方（买方主导，主力护盘）
 """
 
 import logging
@@ -96,11 +97,10 @@ class Scanner:
         total = len(all_stocks)
         logger.info(f"全市场共 {total} 只股票")
 
-        # 排除ST和非主板
-        all_stocks["is_st"] = all_stocks["name"].apply(is_st_stock)
+        # 排除非主板（ST排除留给SEPA步骤1，这里只过滤板块）
         all_stocks["is_main"] = all_stocks["code"].apply(is_main_board)
-        stocks = all_stocks[~all_stocks["is_st"] & all_stocks["is_main"]].copy()
-        self.log_filter(1, "排除ST和非主板", total, len(stocks))
+        stocks = all_stocks[all_stocks["is_main"]].copy()
+        self.log_filter(1, "排除非主板（科创板/北交所/创业板）", total, len(stocks))
 
         # ============ 步骤2：涨幅范围 3%-5% ============
         logger.info("===== 步骤2：涨幅范围 3%-5% =====")
@@ -183,13 +183,16 @@ class Scanner:
         if stocks.empty:
             return self._build_result(stocks, market_trend)
 
-        # ============ 步骤7：成交量温和放大（振幅过滤） ============
-        logger.info("===== 步骤7：振幅/成交量筛选 =====")
+        # ============ 步骤7：成交量稳定放大筛选 ============
+        logger.info("===== 步骤7：成交量稳定放大筛选 =====")
         before = len(stocks)
-        # 振幅过高=波动过大，风险高
+        # 杨永兴原文：把成交量忽高忽低的删掉，只留下成交量温和放大的
+        # 当前实现：振幅过滤（振幅过大=波动风险高），成交量稳定性需历史数据暂用振幅替代
         if "amplitude" in stocks.columns:
             stocks = stocks[stocks["amplitude"] <= AMPLITUDE_MAX].copy()
-        self.log_filter(7, f"振幅≤{AMPLITUDE_MAX}%", before, len(stocks))
+            self.log_filter(7, f"成交量温和放大（振幅≤{AMPLITUDE_MAX}%）", before, len(stocks))
+        else:
+            self.log_filter(7, "振幅数据缺失，跳过", before, len(stocks))
         logger.info(f"剩余 {len(stocks)} 只")
 
         if stocks.empty:

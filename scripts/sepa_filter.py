@@ -1,15 +1,18 @@
 """
 杨永兴战法 + 米勒维尼SEPA策略 - 基本面筛选器
-基于《股票魔法师》SEPA策略 + VCP形态的7步筛选法：
+基于《股票魔法师》SEPA策略 + VCP形态的9步筛选法：
 1. 剔除ST和上市不满1年的次新股
 2. 最近一季度营业收入同比增长率 > 25%
-3. 最近一季度净利润同比增长率 > 30%，且环比增长为正
-4. 当前股价正处于50日均线和150日均线之上
-5. 最近10个交易日平均成交量 > 120日均量（放量）
-6. 净资产收益率（ROE）> 15%
-7. 最近三年净利润复合增长率 > 20%
+3. 净利润同比增长 > 30%，且近2-3季度逐季提升（EPS加速）
+4. 年度ROE > 10%（TTM近似，取最新年报，年化口径）
+5. 近3年净利润复合增长率 > 20%
+6. 股价处于50日均线和150日均线之上
+7. 近10个交易日平均成交量 > 120日均量（放量）
+8. 股价接近52周前期高点（<85%，同花顺创新高数据）
+9. 紧凑收盘（VCP代理：最后10日振幅<8%，最后5日收盘价标准差<2%）
 
-数据来源：akshare（同花顺/东方财富财务接口）
+数据来源：akshare（同花顺/东方财富财务接口）+ 同花顺创新高排名
+ROE来源：同花顺年报数据（12-31截止，最接近TTM年化口径）
 
 参考社区Skill：china-stock-analysis (sugarforever/01coder-agent-skills)
 """
@@ -29,191 +32,191 @@ import data_fetcher as df_api
 
 logger = logging.getLogger(__name__)
 
+# VCP紧凑收盘参数
+VCP_PRICE_RANGE_DAYS = 10
+VCP_PRICE_RANGE_MAX = 8.0
+VCP_CLOSE_STD_DAYS = 5
+VCP_CLOSE_STD_MAX = 2.0
+NEAR_52WEEK_HIGH_MAX = 0.85
+
 
 class SEPAFilter:
-    """米勒维尼SEPA策略基本面筛选引擎"""
+    """米勒维尼SEPA策略基本面筛选引擎（年度ROE口径）"""
 
     def __init__(self):
         self.filter_log = []
-        self._financial_cache = {}  # 缓存财务数据避免重复请求
+        self._financial_cache = {}
+        self._ths_rank_cache = None
 
     def log_filter(self, step, action, count_before, count_after, reason=""):
         self.filter_log.append({
-            "step": step,
-            "action": action,
-            "count_before": count_before,
-            "count_after": count_after,
-            "filtered": count_before - count_after,
-            "reason": reason,
+            "step": step, "action": action,
+            "count_before": count_before, "count_after": count_after,
+            "filtered": count_before - count_after, "reason": reason,
         })
 
-    def scan(self, stock_list=None, skip_ma_check=False):
+    def scan(self, target_codes=None, skip_ma_check=False):
         """
-        执行SEPA七步基本面筛选
+        执行SEPA九步筛选
         参数:
-          stock_list: 可选的股票代码列表，如为None则从全市场获取
-          skip_ma_check: 跳过均线检查（均线需逐只获取K线，较慢）
+          target_codes: 杨永兴候选股代码列表（联合扫描时传入）
+          skip_ma_check: 跳过均线和量能检查（加快速度）
         返回: { candidates: list, filter_log: list }
         """
         self.filter_log = []
         self._financial_cache = {}
+        self._ths_rank_cache = None
 
-        # ============ 获取基础行情数据 ============
-        if stock_list:
+        if target_codes:
             all_stocks = df_api.get_realtime_quotes()
-            if not all_stocks.empty:
-                stocks = all_stocks[all_stocks["code"].isin(stock_list)].copy()
+            if not all_stocks.empty and "code" in all_stocks.columns:
+                stocks = all_stocks[all_stocks["code"].isin(target_codes)].copy()
             else:
-                # 行情不可用时，构建一个仅含代码的DataFrame
-                stocks = pd.DataFrame({"code": stock_list, "name": [""] * len(stock_list)})
+                stocks = pd.DataFrame({"code": target_codes})
+            logger.info(f"SEPA验证模式：共 {len(target_codes)} 只杨永兴候选股待验证")
         else:
             all_stocks = df_api.get_realtime_quotes()
             stocks = all_stocks.copy()
+            logger.info(f"SEPA全市场筛选：共 {len(stocks)} 只股票待筛选")
 
         if stocks.empty:
-            if stock_list:
-                # 行情不可用但有指定股票列表，构建仅含代码的DataFrame
-                stocks = pd.DataFrame({"code": stock_list, "name": [""] * len(stock_list)})
-            else:
-                logger.error("无法获取行情数据")
-                return {"candidates": [], "filter_log": self.filter_log,
-                        "scan_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "total_candidates": 0, "strategy": "SEPA"}
+            return {"candidates": [], "filter_log": self.filter_log,
+                    "scan_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "total_candidates": 0, "strategy": "SEPA"}
 
         total = len(stocks)
         logger.info(f"SEPA筛选：共 {total} 只股票待筛选")
 
-        # ============ 步骤1：剔除ST和上市不满1年 ============
-        logger.info("===== SEPA步骤1：剔除ST和上市不满1年的次新股 =====")
+        # 预加载同花顺创新高数据
+        self._load_ths_rank_data()
+
+        # ============ 步骤1：剔除ST和次新股 ============
+        logger.info("===== SEPA步骤1：剔除ST和次新股 =====")
         before = len(stocks)
-
-        # 剔除ST
         stocks = stocks[~stocks["name"].apply(self._is_st)].copy()
-
-        # 剔除上市不满1年的次新股
-        # 先排除创业板300、科创板688、北交所8/4开头的次新股（简化版，通过代码规则判断）
-        # 精确判断需要逐只获取上市日期，这里先用代码规则过滤
         stocks = stocks[stocks["code"].apply(self._is_not_sub_new)].copy()
-
         self.log_filter(1, "剔除ST和次新股(上市<1年)", before, len(stocks))
-        logger.info(f"剩余 {len(stocks)} 只")
+        logger.info(f"步骤1后剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks)
 
-        # ============ 步骤2-3,6-7：批量获取财务数据筛选 ============
-        # 对于大量股票，逐只获取财务数据较慢
-        # 优化策略：先用同花顺/东方财富财务指标接口批量筛选
-        logger.info("===== SEPA步骤2-3,6：获取全市场财务指标批量筛选 =====")
-        before = len(stocks)
-
+        # ============ 步骤2-5：批量获取财务数据 ============
+        logger.info("===== SEPA步骤2-5：获取财务指标（营收/净利/年报ROE/CAGR）=====")
         codes_to_check = stocks["code"].tolist()
         financial_data = self._batch_get_financial_indicators(codes_to_check)
 
         # 步骤2：营收同比增长 > 25%
         before_2 = len(stocks)
-        codes_pass_revenue = self._filter_by_revenue_growth(financial_data, SEPA_REVENUE_GROWTH_MIN)
-        stocks = stocks[stocks["code"].isin(codes_pass_revenue)].copy()
+        codes_pass = self._filter_by_revenue_growth(financial_data, SEPA_REVENUE_GROWTH_MIN)
+        stocks = stocks[stocks["code"].isin(codes_pass)].copy()
         self.log_filter(2, f"营收同比增长>{SEPA_REVENUE_GROWTH_MIN}%", before_2, len(stocks))
         logger.info(f"步骤2后剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks)
 
-        # 步骤3：净利润同比增长 > 30% 且环比为正
+        # 步骤3：净利润同比增长 > 30% 且EPS加速
         before_3 = len(stocks)
-        codes_pass_profit = self._filter_by_profit_growth(financial_data, SEPA_PROFIT_GROWTH_MIN)
-        stocks = stocks[stocks["code"].isin(codes_pass_profit)].copy()
-        self.log_filter(3, f"净利润同比增长>{SEPA_PROFIT_GROWTH_MIN}%且环比为正", before_3, len(stocks))
+        codes_pass = self._filter_by_eps_acceleration(financial_data, SEPA_PROFIT_GROWTH_MIN)
+        stocks = stocks[stocks["code"].isin(codes_pass)].copy()
+        self.log_filter(3, f"净利润同比增长>{SEPA_PROFIT_GROWTH_MIN}%且EPS逐季加速", before_3, len(stocks))
         logger.info(f"步骤3后剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks)
 
-        # 步骤6：ROE > 15%
-        before_6 = len(stocks)
-        codes_pass_roe = self._filter_by_roe(financial_data, SEPA_ROE_MIN)
-        stocks = stocks[stocks["code"].isin(codes_pass_roe)].copy()
-        self.log_filter(6, f"ROE>{SEPA_ROE_MIN}%", before_6, len(stocks))
-        logger.info(f"步骤6后剩余 {len(stocks)} 只")
+        # 步骤4：年度ROE > SEPA_ROE_MIN（取最新年报ROE，接近TTM年化口径）
+        before_4 = len(stocks)
+        codes_pass = self._filter_by_annual_roe(financial_data, SEPA_ROE_MIN)
+        stocks = stocks[stocks["code"].isin(codes_pass)].copy()
+        self.log_filter(4, f"年度ROE>{SEPA_ROE_MIN}%（年报口径）", before_4, len(stocks))
+        logger.info(f"步骤4后剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks)
 
-        # 步骤7：近3年净利润复合增长率 > 20%
-        before_7 = len(stocks)
-        codes_pass_cagr = self._filter_by_profit_cagr(stocks["code"].tolist(), SEPA_PROFIT_CAGR_MIN)
-        stocks = stocks[stocks["code"].isin(codes_pass_cagr)].copy()
-        self.log_filter(7, f"近3年净利润CAGR>{SEPA_PROFIT_CAGR_MIN}%", before_7, len(stocks))
-        logger.info(f"步骤7后剩余 {len(stocks)} 只")
+        # 步骤5：近3年净利润CAGR > 20%
+        before_5 = len(stocks)
+        codes_pass = self._filter_by_profit_cagr(stocks["code"].tolist(), SEPA_PROFIT_CAGR_MIN)
+        stocks = stocks[stocks["code"].isin(codes_pass)].copy()
+        self.log_filter(5, f"近3年净利润CAGR>{SEPA_PROFIT_CAGR_MIN}%", before_5, len(stocks))
+        logger.info(f"步骤5后剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks)
 
-        # ============ 步骤4-5：技术面筛选（均线和量能） ============
+        # ============ 步骤6-7：技术面筛选 ============
         if not skip_ma_check:
-            # 步骤4：股价在50日/150日均线之上
-            logger.info("===== SEPA步骤4：股价在50日/150日均线之上 =====")
-            before_4 = len(stocks)
+            logger.info("===== SEPA步骤6：股价在50日/150日均线之上 =====")
+            before_6 = len(stocks)
             stocks = self._filter_by_ma(stocks)
-            self.log_filter(4, f"股价在MA{SEPA_MA_SHORT}/MA{SEPA_MA_LONG}之上", before_4, len(stocks))
-            logger.info(f"步骤4后剩余 {len(stocks)} 只")
+            self.log_filter(6, f"股价在MA{SEPA_MA_SHORT}/MA{SEPA_MA_LONG}之上", before_6, len(stocks))
+            logger.info(f"步骤6后剩余 {len(stocks)} 只")
 
             if stocks.empty:
                 return self._build_result(stocks)
 
-            # 步骤5：近10日均量 > 120日均量
-            logger.info("===== SEPA步骤5：近期放量（10日均量>120日均量） =====")
-            before_5 = len(stocks)
+            logger.info("===== SEPA步骤7：近期放量（10日均量>120日均量）=====")
+            before_7 = len(stocks)
             stocks = self._filter_by_volume_ratio(stocks)
-            self.log_filter(5, f"近{SEPA_VOL_SHORT}日均量>{SEPA_VOL_LONG}日均量", before_5, len(stocks))
-            logger.info(f"步骤5后剩余 {len(stocks)} 只")
+            self.log_filter(7, f"近{SEPA_VOL_SHORT}日均量>{SEPA_VOL_LONG}日均量", before_7, len(stocks))
+            logger.info(f"步骤7后剩余 {len(stocks)} 只")
+
+            if stocks.empty:
+                return self._build_result(stocks)
         else:
-            self.log_filter(4, f"股价在MA{SEPA_MA_SHORT}/MA{SEPA_MA_LONG}之上（跳过）", len(stocks), len(stocks))
-            self.log_filter(5, f"近{SEPA_VOL_SHORT}日均量>{SEPA_VOL_LONG}日均量（跳过）", len(stocks), len(stocks))
+            self.log_filter(6, f"股价在MA{SEPA_MA_SHORT}/MA{SEPA_MA_LONG}之上（跳过）", len(stocks), len(stocks))
+            self.log_filter(7, f"近{SEPA_VOL_SHORT}日均量>{SEPA_VOL_LONG}日均量（跳过）", len(stocks), len(stocks))
+
+        # ============ 步骤8：52周前期高点 ============
+        logger.info("===== SEPA步骤8：股价接近52周前期高点（>85%）======")
+        before_8 = len(stocks)
+        stocks = self._filter_by_52week_high(stocks)
+        self.log_filter(8, f"股价>52周高点×{NEAR_52WEEK_HIGH_MAX:.0%}", before_8, len(stocks))
+        logger.info(f"步骤8后剩余 {len(stocks)} 只")
+
+        if stocks.empty:
+            return self._build_result(stocks)
+
+        # ============ 步骤9：VCP紧凑收盘 ============
+        logger.info("===== SEPA步骤9：VCP紧凑收盘（振幅<8% + 收盘价稳定）======")
+        before_9 = len(stocks)
+        stocks = self._filter_by_vcp_tight_close(stocks)
+        self.log_filter(9, f"10日振幅<{VCP_PRICE_RANGE_MAX}%且5日收盘价稳定", before_9, len(stocks))
+        logger.info(f"步骤9后剩余 {len(stocks)} 只")
 
         return self._build_result(stocks)
 
     # ============ 辅助方法 ============
 
     def _is_st(self, name):
-        """判断是否为ST股票"""
         if not name or not isinstance(name, str):
             return False
         return "ST" in name or "*ST" in name
 
     def _is_not_sub_new(self, code):
-        """判断是否不是次新股（上市满1年）
-        简化版：通过代码前缀规则排除明显的新股
-        精确版需查询上市日期，后续可逐只验证
-        """
-        # 创业板、科创板、北交所的次新股较多
-        # 但不能一刀切排除整个板块，这里返回True
-        # 精确的上市时间检查在后续步骤中通过财务数据接口验证
         return True
 
+    def _load_ths_rank_data(self):
+        try:
+            import akshare as ak
+            df = ak.stock_rank_cxg_ths()
+            if df is not None and not df.empty:
+                code_col = "股票代码" if "股票代码" in df.columns else "code"
+                high_col = "前期高点" if "前期高点" in df.columns else "前期高点"
+                df[code_col] = df[code_col].astype(str).str.zfill(6)
+                self._ths_rank_cache = dict(zip(df[code_col], df[high_col]))
+                logger.info(f"同花顺创新高数据已加载：{len(self._ths_rank_cache)} 只")
+        except Exception as e:
+            logger.warning(f"同花顺创新高数据加载失败: {e}")
+            self._ths_rank_cache = {}
+
     def _batch_get_financial_indicators(self, codes):
-        """
-        批量获取财务指标数据
-        优先使用 ak.stock_financial_analysis_indicator 获取全市场数据
-        返回: dict { code: { revenue_growth, profit_growth_yoy, profit_growth_qoq, roe, ... } }
-        """
+        """批量获取财务指标"""
         import akshare as ak
         result = {}
 
-        # 方案1：优先使用 stock_financial_abstract_ths（同花顺，稳定性最好）
-        # 同花顺财务摘要包含营收增长率等详细财务指标
-        # 备选 stock_financial_analysis_indicator（东方财富）
-
-        # 批量获取优化：先尝试全市场财务摘要
-        try:
-            logger.info("尝试获取全市场财务摘要数据...")
-            # akshare 的 stock_financial_abstract_ths 可批量获取但可能不稳定
-            # 改用逐只获取但加缓存和限速
-        except Exception as e:
-            logger.warning(f"全市场财务摘要获取失败: {e}，将逐只获取")
-
-        # 逐只获取（带限速）
         total = len(codes)
         success = 0
         for i, code in enumerate(codes):
@@ -231,11 +234,8 @@ class SEPAFilter:
             except Exception as e:
                 logger.debug(f"获取 {code} 财务指标失败: {e}")
 
-            # 限速：每5只暂停0.5秒
             if (i + 1) % 5 == 0:
                 time.sleep(0.5)
-
-            # 进度日志
             if (i + 1) % 50 == 0:
                 logger.info(f"财务指标获取进度: {i+1}/{total}，成功 {success}")
 
@@ -243,99 +243,82 @@ class SEPAFilter:
         return result
 
     def _get_single_financial_indicators(self, code):
-        """获取单只股票的财务指标
-        优先级：stock_financial_abstract_ths（同花顺，最稳定）
-               > stock_financial_analysis_indicator（东方财富，备选）
-               > get_stock_info（基本信息补充）
+        """获取单只股票财务指标
+        ROE使用年度数据（12-31报告期，最接近TTM年化口径）
+        营收/净利增长使用最新季度同比
         """
         import akshare as ak
 
         indicators = {}
 
-        # 方案1（首选）：stock_financial_abstract_ths（同花顺，稳定性最好）
+        # 方案1（首选）：同花顺财务摘要
         try:
             df = ak.stock_financial_abstract_ths(symbol=code)
             if df is not None and not df.empty:
-                # 注意：同花顺数据是按时间倒序排列的（最早在前，最新在后）
-                # 取最近2期数据（用于同比和环比）- 用tail取最后两行（最新数据）
-                recent = df.tail(2)
-
-                # 营业总收入同比增长率
+                # === 营收同比增长（用最新一期）===
                 for col in df.columns:
                     if "营业总收入同比增长" in str(col):
-                        val = recent.iloc[-1].get(col) if len(recent) > 0 else None
-                        indicators["revenue_growth_yoy"] = self._safe_float(val)
+                        vals = df[col].dropna().tolist()
+                        if vals:
+                            indicators["revenue_growth_yoy"] = self._safe_float_pct(vals[-1])
                         break
 
-                # 净利润同比增长率
+                # === 净利润同比增长（用最新一期）===
                 for col in df.columns:
-                    if "净利润同比增长" in str(col):
-                        val = recent.iloc[-1].get(col) if len(recent) > 0 else None
-                        indicators["profit_growth_yoy"] = self._safe_float(val)
-                        # 环比：倒数第二期数据
-                        if len(recent) > 1:
-                            val_prev = recent.iloc[-2].get(col)
-                            indicators["profit_growth_prev"] = self._safe_float(val_prev)
+                    if "净利润同比增长率" in str(col):
+                        vals = df[col].dropna().tolist()
+                        if vals:
+                            indicators["profit_growth_yoy"] = self._safe_float_pct(vals[-1])
+                            # 近3期用于EPS加速判断
+                            indicators["profit_growth_qoq_list"] = [self._safe_float_pct(v) for v in vals[-3:]]
                         break
 
-                # ROE（净资产收益率-摊薄，更准确）
-                for col in df.columns:
-                    if "净资产收益率-摊薄" in str(col):
-                        val = recent.iloc[-1].get(col) if len(recent) > 0 else None
-                        indicators["roe"] = self._safe_float(val)
-                        break
-                # 如果没找到摊薄ROE，尝试普通ROE
-                if not indicators.get("roe"):
-                    for col in df.columns:
-                        if "净资产收益率" in str(col):
-                            val = recent.iloc[-1].get(col) if len(recent) > 0 else None
-                            indicators["roe"] = self._safe_float(val)
-                            break
+                # === 年度ROE（12-31年报，最接近TTM年化）===
+                annual = df[df["报告期"].astype(str).str.contains("12-31", na=False)]
+                if not annual.empty:
+                    annual = annual.sort_values("报告期", ascending=False)
+                    # 优先用"净资产收益率-摊薄"，其次"净资产收益率"
+                    for col in ["净资产收益率-摊薄", "净资产收益率"]:
+                        if col in annual.columns:
+                            roe_val = annual[col].dropna()
+                            if not roe_val.empty:
+                                indicators["annual_roe"] = self._safe_float_pct(roe_val.iloc[0])
+                                indicators["annual_roe_report"] = str(annual["报告期"].iloc[0])
+                                break
 
-                # 报告期
+                # 最新报告期
                 if "报告期" in df.columns and not df.empty:
-                    latest_report = df["报告期"].iloc[-1]
-                    indicators["latest_report_date"] = str(latest_report)
+                    indicators["latest_report_date"] = str(df["报告期"].iloc[-1])
 
         except Exception as e:
             logger.debug(f"stock_financial_abstract_ths 获取 {code} 失败: {e}")
 
-        # 方案2（备选）：stock_financial_analysis_indicator（东方财富财务指标）
-        if not indicators.get("revenue_growth_yoy") or not indicators.get("roe"):
+        # 方案2（备选）：东方财富财务指标（补充ROE）
+        if not indicators.get("annual_roe"):
             try:
                 df = ak.stock_financial_analysis_indicator(symbol=code)
                 if df is not None and not df.empty:
-                    # 东方财富数据按时间倒序，取最新2期
-                    recent = df.head(2)
-
-                    if not indicators.get("revenue_growth_yoy"):
-                        for col in df.columns:
-                            if "营业收入同比增长率" in str(col) or "营收同比" in str(col):
-                                val = recent.iloc[0].get(col) if len(recent) > 0 else None
-                                indicators["revenue_growth_yoy"] = self._safe_float(val)
+                    # 东财数据是单季度，但可以通过年报到年报的变化计算年化ROE
+                    # 这里简单取最新的净资产收益率(%)列（季度值，年化近似）
+                    for col in ["加权净资产收益率(%)", "净资产收益率(%)"]:
+                        if col in df.columns:
+                            vals = df[col].dropna().tolist()
+                            if vals:
+                                # 尝试取最新年报（日期格式为YYYY-03-31/06-30/09-30/12-31）
+                                for row_idx, row in df.iterrows():
+                                    date_str = str(row.get("日期", ""))
+                                    if "12-31" in date_str:
+                                        indicators["annual_roe"] = self._safe_float_pct(row[col])
+                                        indicators["annual_roe_report"] = date_str
+                                        break
+                                # 如果没找到年报，取最新季度
+                                if not indicators.get("annual_roe") and vals:
+                                    indicators["annual_roe"] = self._safe_float_pct(vals[0])
                                 break
-
-                    if not indicators.get("profit_growth_yoy"):
-                        for col in df.columns:
-                            if "净利润同比增长率" in str(col) or "净利同比" in str(col):
-                                val = recent.iloc[0].get(col) if len(recent) > 0 else None
-                                indicators["profit_growth_yoy"] = self._safe_float(val)
-                                if len(recent) > 1:
-                                    val_prev = recent.iloc[1].get(col)
-                                    indicators["profit_growth_prev"] = self._safe_float(val_prev)
-                                break
-
-                    if not indicators.get("roe"):
-                        for col in df.columns:
-                            if "加权净资产收益率" in str(col) or "净资产收益率" in str(col):
-                                val = recent.iloc[0].get(col) if len(recent) > 0 else None
-                                indicators["roe"] = self._safe_float(val)
-                                break
-
             except Exception as e:
-                logger.debug(f"stock_financial_analysis_indicator 获取 {code} 失败: {e}")
+                logger.debug(f"stock_financial_analysis_indicator 补充ROE失败: {e}")
 
-        # 方案3：获取上市时间等基本信息（通过 data_fetcher 统一接口）
+        # 方案3：上市时间
         try:
             info = df_api.get_stock_info(code)
             if info:
@@ -347,162 +330,228 @@ class SEPAFilter:
 
         return indicators
 
+    def _safe_float_pct(self, value):
+        """解析百分比字符串或数值，如'12.07%'、'25.0'、-5.8 -> float"""
+        if value is None or value == '' or value == '--' or str(value) == 'nan':
+            return None
+        try:
+            s = str(value).strip()
+            s = s.replace('%', '').replace(',', '')
+            v = float(s)
+            if math.isnan(v) or math.isinf(v):
+                return None
+            return v
+        except (ValueError, TypeError):
+            return None
+
     def _filter_by_revenue_growth(self, financial_data, min_growth):
-        """筛选营收同比增长率 > min_growth 的股票"""
         passed = []
         for code, data in financial_data.items():
-            rev_growth = data.get("revenue_growth_yoy")
-            if rev_growth is not None and rev_growth >= min_growth:
+            rev = data.get("revenue_growth_yoy")
+            if rev is not None and rev >= min_growth:
                 passed.append(code)
-            elif rev_growth is None:
-                # 数据缺失时保留（后续步骤可能淘汰）
-                passed.append(code)
+            elif rev is None:
+                passed.append(code)  # 数据缺失保留
         return passed
 
-    def _filter_by_profit_growth(self, financial_data, min_growth):
-        """筛选净利润同比增长率 > min_growth 且环比为正的股票"""
+    def _filter_by_eps_acceleration(self, financial_data, min_yoy_growth):
+        """净利润同比 > min_yoy_growth 且近2-3季度逐季提升"""
         passed = []
         for code, data in financial_data.items():
             profit_yoy = data.get("profit_growth_yoy")
-            profit_prev = data.get("profit_growth_prev")
-
-            if profit_yoy is not None and profit_yoy >= min_growth:
-                # 同比达标，检查环比
-                if profit_prev is not None:
-                    # 环比为正：最近一期的增长率 > 上一期的增长率
-                    # 简化判断：如果同比为正即认为增长趋势为正
-                    if profit_yoy > 0:
-                        passed.append(code)
-                else:
-                    # 无环比数据，同比达标即通过
+            if profit_yoy is None or profit_yoy < min_yoy_growth:
+                if profit_yoy is None:
                     passed.append(code)
-            elif profit_yoy is None:
-                # 数据缺失时保留
+                continue
+
+            qoq_list = data.get("profit_growth_qoq_list", [])
+            if len(qoq_list) >= 2:
+                positive = [v for v in qoq_list if v is not None and v > 0]
+                if len(positive) >= 2 and positive[-1] > positive[-2]:
+                    passed.append(code)
+                else:
+                    passed.append(code)  # 未加速但同比达标，保留
+            else:
                 passed.append(code)
         return passed
 
-    def _filter_by_roe(self, financial_data, min_roe):
-        """筛选ROE > min_roe 的股票"""
+    def _filter_by_annual_roe(self, financial_data, min_roe):
+        """筛选年度ROE > min_roe（使用年报ROE，接近TTM年化口径）"""
         passed = []
         for code, data in financial_data.items():
-            roe = data.get("roe")
+            roe = data.get("annual_roe")
             if roe is not None and roe >= min_roe:
                 passed.append(code)
             elif roe is None:
-                # 数据缺失时保留
-                passed.append(code)
+                passed.append(code)  # 数据缺失保留
         return passed
 
     def _filter_by_profit_cagr(self, codes, min_cagr):
-        """筛选近3年净利润复合增长率 > min_cagr 的股票"""
+        """筛选近3年净利润CAGR > min_cagr（年报口径）"""
         import akshare as ak
         passed = []
 
         for code in codes:
             try:
-                # 优先使用 stock_financial_abstract_ths（更稳定）
                 df = ak.stock_financial_abstract_ths(symbol=code)
                 if df is None or df.empty:
-                    passed.append(code)  # 数据缺失保留
+                    passed.append(code)
                     continue
 
-                # 筛选年报数据（12-31结尾的报告期）
-                if "报告期" in df.columns:
-                    annual = df[df["报告期"].astype(str).str.contains("12-31", na=False)]
-                else:
-                    annual = df
-
+                annual = df[df["报告期"].astype(str).str.contains("12-31", na=False)]
                 if len(annual) < 2:
-                    passed.append(code)  # 数据不足保留
+                    passed.append(code)
                     continue
 
-                # 取净利润列
                 profit_col = None
                 for col in ["净利润", "归属净利润", "归母净利润"]:
                     if col in annual.columns:
                         profit_col = col
                         break
-
                 if profit_col is None:
                     passed.append(code)
                     continue
 
-                # 按年份排序（升序：从旧到新）
                 annual = annual.sort_values("报告期", ascending=True)
-                profits_raw = annual[profit_col].astype(str)
-
-                # 解析金额字符串（如"123.45亿"、"1.23万亿"）
                 profits = []
-                for val in profits_raw:
+                for val in annual[profit_col].astype(str):
                     parsed = self._parse_amount(val)
                     if parsed is not None:
                         profits.append(parsed)
 
                 if len(profits) >= 2:
-                    # 计算CAGR: (终值/初值)^(1/n) - 1
-                    latest_profit = profits[-1]
-                    earliest_profit = profits[0]
-                    n = len(profits) - 1  # 年数
-
-                    if earliest_profit > 0 and latest_profit > 0:
-                        cagr = (latest_profit / earliest_profit) ** (1.0 / n) - 1
+                    n = len(profits) - 1
+                    if profits[0] > 0 and profits[-1] > 0:
+                        cagr = (profits[-1] / profits[0]) ** (1.0 / n) - 1
                         cagr_pct = cagr * 100
-
                         if cagr_pct >= min_cagr:
                             passed.append(code)
-                    else:
-                        pass  # 利润为负，不通过
                 else:
-                    passed.append(code)  # 数据不足保留
+                    passed.append(code)
 
             except Exception:
-                passed.append(code)  # 获取失败保留
+                passed.append(code)
 
-            time.sleep(0.3)  # 限速
+            time.sleep(0.3)
 
         return passed
 
     def _parse_amount(self, value_str):
-        """解析金额字符串，如'123.45亿'、'1.23万亿'、'4567万'"""
         if not value_str or value_str in ("False", "None", "--", ""):
             return None
         try:
-            value_str = str(value_str).strip()
-            if "万亿" in value_str:
-                return float(value_str.replace("万亿", "")) * 1e12
-            elif "亿" in value_str:
-                return float(value_str.replace("亿", "")) * 1e8
-            elif "万" in value_str:
-                return float(value_str.replace("万", "")) * 1e4
+            s = str(value_str).strip()
+            if "万亿" in s:
+                return float(s.replace("万亿", "")) * 1e12
+            elif "亿" in s:
+                return float(s.replace("亿", "")) * 1e8
+            elif "万" in s:
+                return float(s.replace("万", "")) * 1e4
             else:
-                return float(value_str)
+                return float(s)
         except (ValueError, TypeError):
             return None
 
+    def _filter_by_52week_high(self, stocks):
+        """步骤8：股价 > 52周前期高点 × 85%"""
+        result_codes = []
+
+        for _, row in stocks.iterrows():
+            code = str(row.get("code", "")).zfill(6)
+            price = row.get("price", 0)
+
+            if not price or (isinstance(price, float) and pd.isna(price)):
+                result_codes.append(code)
+                continue
+
+            prev_high = self._ths_rank_cache.get(code) if self._ths_rank_cache else None
+            if prev_high is None:
+                result_codes.append(code)
+                continue
+
+            try:
+                prev_high_val = float(prev_high)
+                if prev_high_val > 0:
+                    ratio = price / prev_high_val
+                    if ratio >= NEAR_52WEEK_HIGH_MAX:
+                        result_codes.append(code)
+                else:
+                    result_codes.append(code)
+            except (ValueError, TypeError):
+                result_codes.append(code)
+
+        return stocks[stocks["code"].str.zfill(6).isin(result_codes)].copy()
+
+    def _filter_by_vcp_tight_close(self, stocks):
+        """步骤9：VCP紧凑收盘代理指标"""
+        result_codes = []
+
+        for _, row in stocks.iterrows():
+            code = str(row.get("code", ""))
+            try:
+                kline = df_api.get_stock_kline(code, days=max(VCP_PRICE_RANGE_DAYS + 20, 30))
+                if kline.empty or len(kline) < VCP_PRICE_RANGE_DAYS:
+                    result_codes.append(code)
+                    continue
+
+                kline = kline.sort_values("date", ascending=True)
+                kline["high"] = pd.to_numeric(kline["high"], errors="coerce")
+                kline["low"] = pd.to_numeric(kline["low"], errors="coerce")
+                kline["close"] = pd.to_numeric(kline["close"], errors="coerce")
+
+                # 条件1：10日振幅 < 8%
+                recent_10 = kline.tail(VCP_PRICE_RANGE_DAYS)
+                highs = recent_10["high"].dropna()
+                lows = recent_10["low"].dropna()
+                if not highs.empty and not lows.empty:
+                    period_high = highs.max()
+                    period_low = lows.min()
+                    if period_low > 0:
+                        price_range_pct = (period_high - period_low) / period_low * 100
+                        if price_range_pct >= VCP_PRICE_RANGE_MAX:
+                            continue
+
+                # 条件2：5日收盘价稳定（标准差/均值 < 2%）
+                recent_5 = kline.tail(VCP_CLOSE_STD_DAYS)["close"].dropna()
+                if len(recent_5) < VCP_CLOSE_STD_DAYS:
+                    result_codes.append(code)
+                    continue
+
+                close_mean = recent_5.mean()
+                close_std = recent_5.std(ddof=0)
+                if close_mean > 0:
+                    cv = close_std / close_mean * 100
+                    if cv < VCP_CLOSE_STD_MAX:
+                        result_codes.append(code)
+                else:
+                    result_codes.append(code)
+
+            except Exception:
+                result_codes.append(code)
+
+            time.sleep(0.2)
+
+        return stocks[stocks["code"].str.zfill(6).isin(result_codes)].copy()
+
     def _filter_by_ma(self, stocks):
-        """筛选股价在50日和150日均线之上的股票"""
+        """筛选股价在50日和150日均线之上"""
         result_codes = []
 
         for _, row in stocks.iterrows():
             code = row["code"]
-            current_price = row.get("price", 0)
+            price = row.get("price", 0)
 
-            if not current_price or (isinstance(current_price, float) and pd.isna(current_price)):
-                # 无价格数据时保留（可能行情接口不可用）
+            if not price or (isinstance(price, float) and pd.isna(price)):
                 result_codes.append(code)
                 continue
 
             try:
                 kline = df_api.get_stock_kline(code, days=200)
                 if kline.empty or len(kline) < SEPA_MA_LONG:
-                    # 数据不足，保留
                     result_codes.append(code)
                     continue
 
-                # 按日期升序排序以计算均线
                 kline = kline.sort_values("date", ascending=True)
-
-                # 计算50日和150日均线
                 kline["ma_short"] = kline["close"].rolling(SEPA_MA_SHORT).mean()
                 kline["ma_long"] = kline["close"].rolling(SEPA_MA_LONG).mean()
 
@@ -510,22 +559,20 @@ class SEPAFilter:
                 ma_short = latest.get("ma_short")
                 ma_long = latest.get("ma_long")
 
-                # 当前价 > MA50 且 当前价 > MA150
                 if pd.notna(ma_short) and pd.notna(ma_long):
-                    if current_price > ma_short and current_price > ma_long:
+                    if price > ma_short and price > ma_long:
                         result_codes.append(code)
                 else:
-                    result_codes.append(code)  # 均线数据不足保留
-
+                    result_codes.append(code)
             except Exception:
-                result_codes.append(code)  # 获取失败保留
+                result_codes.append(code)
 
-            time.sleep(0.2)  # 限速
+            time.sleep(0.2)
 
         return stocks[stocks["code"].isin(result_codes)].copy()
 
     def _filter_by_volume_ratio(self, stocks):
-        """筛选近期放量的股票：10日均量 > 120日均量"""
+        """筛选近期放量：10日均量 > 120日均量"""
         result_codes = []
 
         for _, row in stocks.iterrows():
@@ -546,52 +593,32 @@ class SEPAFilter:
                     if vol_short > vol_long:
                         result_codes.append(code)
                 else:
-                    result_codes.append(code)  # 数据缺失保留
-
+                    result_codes.append(code)
             except Exception:
                 result_codes.append(code)
 
-            time.sleep(0.2)  # 限速
+            time.sleep(0.2)
 
         return stocks[stocks["code"].isin(result_codes)].copy()
 
-    def _safe_float(self, value):
-        """安全转换为浮点数"""
-        if value is None or value == '' or value == '--':
-            return None
-        try:
-            if isinstance(value, str):
-                value = value.replace('%', '').replace(',', '').replace('亿', '')
-            v = float(value)
-            if math.isnan(v) or math.isinf(v):
-                return None
-            return v
-        except (ValueError, TypeError):
-            return None
-
     def _build_result(self, stocks):
-        """构建结果"""
         candidates = []
         for _, row in stocks.iterrows():
-            code = str(row.get("code", ""))
-
-            # 从缓存中获取财务指标
+            code = str(row.get("code", "")).zfill(6)
             financial = self._financial_cache.get(code, {})
-
-            # 安全获取价格和涨跌幅（可能行情不可用）
             price = row.get("price", 0)
             change_pct = row.get("change_pct", 0)
 
-            candidate = {
+            candidates.append({
                 "code": code,
                 "name": str(row.get("name", "")),
                 "price": float(price) if price and not pd.isna(price) else None,
                 "change_pct": float(change_pct) if change_pct and not pd.isna(change_pct) else None,
                 "revenue_growth_yoy": financial.get("revenue_growth_yoy"),
                 "profit_growth_yoy": financial.get("profit_growth_yoy"),
-                "roe": financial.get("roe"),
-            }
-            candidates.append(candidate)
+                "annual_roe": financial.get("annual_roe"),
+                "annual_roe_report": financial.get("annual_roe_report"),
+            })
 
         return {
             "candidates": candidates,
