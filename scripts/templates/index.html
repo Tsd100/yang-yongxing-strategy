@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>选股扫描器</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text2: #8b949e;
+  --green: #3fb950;
+  --red: #f85149;
+  --blue: #58a6ff;
+  --yellow: #d2991d;
+  --purple: #a371f7;
+  --accent: #58a6ff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+header {
+  background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+header h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.5px; }
+header h1 span { color: var(--accent); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+.status-dot.idle { background: var(--text2); }
+.status-dot.running { background: var(--yellow); animation: pulse 1s infinite; }
+.status-dot.done { background: var(--green); }
+@keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.3 } }
+
+.main-grid {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 16px;
+  padding: 16px 24px;
+  height: calc(100vh - 58px);
+}
+
+/* 左侧面板 */
+.left-panel {
+  display: flex; flex-direction: column; gap: 10px;
+  overflow-y: auto;
+}
+.panel {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.panel h3 {
+  font-size: 13px; font-weight: 600; color: var(--text2);
+  text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px;
+  border-bottom: 1px solid var(--border); padding-bottom: 8px;
+}
+
+/* 参数组 */
+.param-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.param-row label { color: var(--text); font-size: 12px; min-width: 70px; }
+.param-row input[type="range"] { flex: 1; margin: 0 8px; accent-color: var(--accent); }
+.param-row .val { color: var(--accent); font-size: 12px; min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+.param-row input[type="number"] {
+  width: 62px; background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); padding: 2px 6px; border-radius: 4px; font-size: 12px;
+  text-align: right;
+}
+.toggle-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.toggle-row label { font-size: 12px; }
+.switch {
+  position: relative; width: 36px; height: 20px; display: inline-block;
+}
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--bg3); border-radius: 20px; transition: .3s;
+  border: 1px solid var(--border);
+}
+.slider:before {
+  content: ""; position: absolute; height: 14px; width: 14px;
+  left: 2px; bottom: 2px; background: var(--text2); border-radius: 50%; transition: .3s;
+}
+input:checked + .slider { background: var(--accent); }
+input:checked + .slider:before { transform: translateX(16px); background: #fff; }
+
+/* 预设选择器 */
+.preset-select {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); padding: 6px 10px; border-radius: 4px; font-size: 13px;
+  margin-bottom: 8px;
+}
+.btn {
+  border: none; border-radius: 6px; padding: 10px 18px; font-size: 14px;
+  cursor: pointer; font-weight: 600; transition: all .2s;
+  width: 100%;
+}
+.btn-scan { background: var(--accent); color: #fff; }
+.btn-scan:hover { filter: brightness(1.1); }
+.btn-scan:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-apply { background: var(--bg3); color: var(--text); border: 1px solid var(--border); padding: 6px 12px; font-size: 12px; width: auto; }
+	.btn-sm { border: none; border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer; font-weight: 600; transition: all .2s; }
+	.btn-sm.save { background: var(--accent); color: #fff; }
+	.btn-sm.save:hover { filter: brightness(1.15); }
+	.btn-sm.danger { background: var(--red); color: #fff; }
+	.btn-sm.danger:hover { filter: brightness(1.15); }
+	.btn-sm.copy { background: var(--purple); color: #fff; }
+	.btn-sm.copy:hover { filter: brightness(1.15); }
+
+	/* 策略管理操作栏 */
+	.strategy-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+	.strategy-actions.custom-only { display: none; }
+	.strategy-actions.custom-only.visible { display: flex; }
+
+	/* 模态框 */
+	.modal-overlay {
+	  display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+	  background: rgba(0,0,0,0.7); z-index: 1000; align-items: center; justify-content: center;
+	}
+	.modal-overlay.open { display: flex; }
+	.modal-box {
+	  background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+	  padding: 24px; width: 420px; max-width: 90vw;
+	}
+	.modal-box h3 { font-size: 15px; margin-bottom: 16px; color: var(--text); }
+	.modal-box label { font-size: 12px; color: var(--text2); display: block; margin-bottom: 4px; }
+	.modal-box input, .modal-box textarea, .modal-box select {
+	  width: 100%; background: var(--bg3); border: 1px solid var(--border);
+	  color: var(--text); padding: 8px 10px; border-radius: 4px; font-size: 13px;
+	  margin-bottom: 12px; font-family: inherit;
+	}
+	.modal-box textarea { resize: vertical; min-height: 50px; }
+	.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+	.modal-actions .btn { width: auto; padding: 8px 16px; font-size: 13px; }
+	.btn-cancel { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+	.btn-cancel:hover { background: var(--border); }
+	.btn-confirm { background: var(--accent); color: #fff; }
+
+/* 右侧面板 */
+.right-panel {
+  display: flex; flex-direction: column; gap: 10px;
+  overflow-y: auto;
+}
+
+/* 进度列表 */
+.step-list { max-height: 400px; overflow-y: auto; }
+.step-item {
+  display: flex; align-items: center; padding: 6px 10px;
+  border-bottom: 1px solid var(--border); font-size: 12px;
+  gap: 10px;
+}
+.step-item .phase { color: var(--purple); min-width: 36px; font-weight: 600; }
+.step-item .step-num { color: var(--text2); min-width: 20px; }
+.step-item .label { flex: 1; }
+.step-item .count { color: var(--text2); min-width: 50px; text-align: right; }
+.step-item .filtered { color: var(--red); min-width: 40px; text-align: right; }
+.step-item.current { background: rgba(88,166,255,0.08); }
+.step-item.has-stocks { cursor: pointer; }
+.step-item.has-stocks:hover { background: rgba(88,166,255,0.12); }
+.step-item .toggle-icon { font-size: 10px; color: var(--text2); min-width: 14px; transition: transform .2s; }
+.step-item .toggle-icon.open { transform: rotate(90deg); }
+
+/* 步骤内嵌股票列表 */
+.stock-detail-panel {
+  display: none; background: var(--bg); border-bottom: 1px solid var(--border);
+  padding: 4px 10px; max-height: 260px; overflow-y: auto;
+}
+.stock-detail-panel.open { display: block; }
+.stock-detail-panel table { width: 100%; font-size: 11px; border-collapse: collapse; }
+.stock-detail-panel th {
+  background: var(--bg3); padding: 3px 6px; text-align: right; color: var(--text2);
+  position: sticky; top: 0; z-index: 1;
+}
+.stock-detail-panel th:first-child, .stock-detail-panel td:first-child { text-align: left; }
+.stock-detail-panel td { padding: 2px 6px; border-bottom: 1px solid var(--border); text-align: right; }
+
+/* 标签切换 */
+.tabs { display: flex; gap: 0; margin-bottom: 12px; }
+.tab-btn {
+  background: var(--bg2); border: 1px solid var(--border); color: var(--text2);
+  padding: 8px 20px; cursor: pointer; font-size: 13px; font-weight: 600;
+  transition: all .2s;
+}
+.tab-btn:first-child { border-radius: 6px 0 0 6px; }
+.tab-btn:last-child { border-radius: 0 6px 6px 0; }
+.tab-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* 历史记录 */
+.history-list { max-height: 500px; overflow-y: auto; }
+.history-item {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px 14px; margin-bottom: 8px; cursor: pointer; transition: all .2s;
+}
+.history-item:hover { border-color: var(--accent); }
+.history-item .h-header { display: flex; justify-content: space-between; align-items: center; }
+.history-item .h-time { font-size: 13px; font-weight: 600; color: var(--accent); }
+.history-item .h-summary { font-size: 12px; color: var(--text2); margin-top: 4px; }
+.history-item .h-detail { display: none; margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+.history-item .h-detail.open { display: block; }
+.history-detail-table { width: 100%; font-size: 11px; border-collapse: collapse; }
+.history-detail-table th, .history-detail-table td { padding: 3px 6px; text-align: right; border-bottom: 1px solid var(--border); }
+.history-detail-table th:first-child, .history-detail-table td:first-child { text-align: left; }
+
+.history-params { font-size: 11px; color: var(--text2); margin-top: 6px; }
+.history-params span { display: inline-block; margin-right: 12px; }
+
+.progress-bar {
+  height: 4px; background: var(--bg3); border-radius: 2px; margin: 8px 0;
+  overflow: hidden;
+}
+.progress-bar .fill {
+  height: 100%; background: var(--accent); border-radius: 2px;
+  transition: width .3s; width: 0%;
+}
+
+/* 结果表格 */
+.result-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.result-table th {
+  background: var(--bg3); position: sticky; top: 0; z-index: 1;
+  padding: 8px 10px; text-align: right; font-weight: 600;
+  color: var(--text2); border-bottom: 2px solid var(--border);
+}
+.result-table th:first-child, .result-table td:first-child { text-align: left; }
+.result-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: right; }
+.result-table tr:hover { background: rgba(88,166,255,0.05); }
+.result-table .positive { color: var(--red); }
+.result-table .negative { color: var(--green); }
+.code-link { color: var(--accent); text-decoration: none; font-weight: 600; }
+
+.empty-state { text-align: center; padding: 40px; color: var(--text2); }
+
+.summary-bar {
+  display: flex; gap: 16px; padding: 10px 14px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+  margin-bottom: 8px;
+}
+.summary-item { text-align: center; }
+.summary-item .num { font-size: 22px; font-weight: 700; color: var(--accent); }
+.summary-item .label { font-size: 11px; color: var(--text2); }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* 响应式 */
+@media (max-width: 900px) {
+  .main-grid { grid-template-columns: 1fr; }
+  .left-panel { order: 2; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📊 选股扫描器</h1>
+  <div id="status">
+    <span class="status-dot idle" id="statusDot"></span>
+    <span id="statusText">就绪</span>
+  </div>
+</header>
+
+<div class="main-grid">
+
+  <!-- 左侧参数面板 -->
+  <div class="left-panel">
+    <div class="panel">
+      <h3>策略预设</h3>
+      <select class="preset-select" id="presetSelect" onchange="onPresetChange()">
+        <option value="">-- 选择预设策略 --</option>
+      </select>
+      <div style="display:flex;gap:6px;">
+        <button class="btn btn-apply" onclick="applyPreset()">应用预设</button>
+        <button class="btn btn-apply" onclick="resetParams()">恢复默认</button>
+      </div>
+      <div class="strategy-actions" id="strategyActions">
+        <button class="btn-sm save" onclick="openSaveModal('new')">💾 保存策略</button>
+      </div>
+      <div class="strategy-actions custom-only" id="customActions">
+        <button class="btn-sm save" onclick="quickUpdatePreset()">✏️ 更新</button>
+        <button class="btn-sm copy" onclick="copyPreset()">📋 复制</button>
+        <button class="btn-sm danger" onclick="deletePreset()">🗑️ 删除</button>
+      </div>
+    </div>
+
+    <div class="panel" id="yangParams">
+      <h3>杨永兴 技术面参数</h3>
+      <div class="param-row">
+        <label>涨幅范围</label>
+        <input type="range" id="rise_min" min="0" max="10" step="0.1" value="1.0" oninput="syncVal(this)">
+        <span class="val" id="rise_min_v">1.0%</span>
+      </div>
+      <div class="param-row">
+        <label style="visibility:hidden">到</label>
+        <input type="range" id="rise_max" min="0" max="10" step="0.1" value="5.0" oninput="syncVal(this)">
+        <span class="val" id="rise_max_v">5.0%</span>
+      </div>
+      <div class="param-row">
+        <label>流通市值</label>
+        <input type="number" id="market_cap_min" value="50" step="1">
+        <span style="font-size:12px;color:var(--text2)">亿 —</span>
+        <input type="number" id="market_cap_max" value="200" step="1">
+        <span style="font-size:12px;color:var(--text2)">亿</span>
+      </div>
+      <div class="param-row">
+        <label>换手率</label>
+        <input type="range" id="turnover_min" min="0" max="20" step="0.1" value="5.0" oninput="syncVal(this)">
+        <span class="val" id="turnover_min_v">5.0%</span>
+      </div>
+      <div class="param-row">
+        <label style="visibility:hidden">到</label>
+        <input type="range" id="turnover_max" min="0" max="20" step="0.1" value="10.0" oninput="syncVal(this)">
+        <span class="val" id="turnover_max_v">10.0%</span>
+      </div>
+      <div class="param-row">
+        <label>量比≥</label>
+        <input type="range" id="volume_ratio_min" min="0" max="5" step="0.1" value="1.2" oninput="syncVal(this)">
+        <span class="val" id="volume_ratio_min_v">1.2</span>
+      </div>
+      <div class="param-row">
+        <label>振幅≤</label>
+        <input type="range" id="amplitude_max" min="0" max="15" step="0.1" value="8.0" oninput="syncVal(this)">
+        <span class="val" id="amplitude_max_v">8.0%</span>
+      </div>
+      <div class="param-row">
+        <label>涨停回溯</label>
+        <input type="number" id="limit_up_days" value="20" min="5" max="60" step="1">
+        <span style="font-size:12px;color:var(--text2)">天</span>
+      </div>
+      <div class="param-row">
+        <label>K线上影≤</label>
+        <input type="range" id="kline_shadow_max" min="1" max="10" step="0.1" value="3.0" oninput="syncVal(this)">
+        <span class="val" id="kline_shadow_max_v">3.0%</span>
+      </div>
+      <div class="toggle-row">
+        <label>仅主板</label>
+        <label class="switch"><input type="checkbox" id="main_board_only" checked><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <label>跳过分时检查</label>
+        <label class="switch"><input type="checkbox" id="skip_intraday" checked><span class="slider"></span></label>
+      </div>
+    </div>
+
+    <div class="panel" id="sepaParams">
+      <h3>SEPA 基本面参数</h3>
+      <div class="param-row">
+        <label>营收增长≥</label>
+        <input type="range" id="revenue_growth_min" min="0" max="100" step="1" value="25" oninput="syncVal(this,'%')">
+        <span class="val" id="revenue_growth_min_v">25%</span>
+      </div>
+      <div class="param-row">
+        <label>净利增长≥</label>
+        <input type="range" id="profit_growth_min" min="0" max="100" step="1" value="30" oninput="syncVal(this,'%')">
+        <span class="val" id="profit_growth_min_v">30%</span>
+      </div>
+      <div class="param-row">
+        <label>ROE≥</label>
+        <input type="range" id="roe_min" min="0" max="50" step="1" value="10" oninput="syncVal(this,'%')">
+        <span class="val" id="roe_min_v">10%</span>
+      </div>
+      <div class="param-row">
+        <label>CAGR≥</label>
+        <input type="range" id="profit_cagr_min" min="0" max="50" step="1" value="20" oninput="syncVal(this,'%')">
+        <span class="val" id="profit_cagr_min_v">20%</span>
+      </div>
+      <div class="param-row">
+        <label>短/长均线</label>
+        <input type="number" id="ma_short" value="50" step="1" style="width:48px">
+        <span style="font-size:12px;color:var(--text2)">/</span>
+        <input type="number" id="ma_long" value="150" step="1" style="width:48px">
+      </div>
+      <div class="param-row">
+        <label>短/长均量</label>
+        <input type="number" id="vol_short" value="10" step="1" style="width:48px">
+        <span style="font-size:12px;color:var(--text2)">/</span>
+        <input type="number" id="vol_long" value="120" step="1" style="width:48px">
+      </div>
+      <div class="param-row">
+        <label>接近52周高</label>
+        <input type="range" id="near_52w_high" min="0.5" max="1.0" step="0.01" value="0.85" oninput="syncVal(this,'',1)">
+        <span class="val" id="near_52w_high_v">85%</span>
+      </div>
+      <div class="param-row">
+        <label>VCP振幅≤</label>
+        <input type="range" id="vcp_range_max" min="3" max="15" step="0.5" value="8.0" oninput="syncVal(this,'%')">
+        <span class="val" id="vcp_range_max_v">8.0%</span>
+      </div>
+      <div class="param-row">
+        <label>VCP收盘稳≤</label>
+        <input type="range" id="vcp_close_std_max" min="0.5" max="5" step="0.1" value="2.0" oninput="syncVal(this,'%')">
+        <span class="val" id="vcp_close_std_max_v">2.0%</span>
+      </div>
+      <div class="param-row">
+        <label>上市≥</label>
+        <input type="number" id="listing_min_days" value="365" step="30">
+        <span style="font-size:12px;color:var(--text2)">天</span>
+      </div>
+      <div class="toggle-row">
+        <label>跳过均线量能检查</label>
+        <label class="switch"><input type="checkbox" id="skip_ma_check" checked><span class="slider"></span></label>
+      </div>
+    </div>
+
+    <button class="btn btn-scan" id="scanBtn" onclick="startScan()">🚀 开始扫描</button>
+  </div>
+
+  <!-- 右侧结果面板 -->
+  <div class="right-panel">
+
+    <!-- 标签切换 -->
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('scan')">扫描</button>
+      <button class="tab-btn" onclick="switchTab('history')">历史记录</button>
+    </div>
+
+    <!-- 扫描面板 -->
+    <div id="scanTab">
+    <div class="panel" id="resultPanel">
+      <h3>扫描结果</h3>
+
+      <div class="summary-bar" id="summaryBar" style="display:none">
+        <div class="summary-item">
+          <div class="num" id="sumFinal">0</div>
+          <div class="label">最终候选</div>
+        </div>
+        <div class="summary-item">
+          <div class="num" id="sumYang">0</div>
+          <div class="label">杨永兴通过</div>
+        </div>
+        <div class="summary-item">
+          <div class="num" id="sumTime">--</div>
+          <div class="label">扫描时间</div>
+        </div>
+      </div>
+
+      <div class="progress-bar" id="progressBar" style="display:none">
+        <div class="fill" id="progressFill"></div>
+      </div>
+
+      <div class="step-list" id="stepList">
+        <div class="empty-state">点击"开始扫描"查看实时进度</div>
+      </div>
+
+      <div id="warningBox" style="display:none;background:rgba(248,81,73,0.1);border:1px solid var(--red);border-radius:6px;padding:10px;margin-top:8px;color:var(--red);"></div>
+
+      <div style="overflow-x:auto;max-height:500px;overflow-y:auto;margin-top:8px;" id="tableContainer">
+        <table class="result-table" id="resultTable" style="display:none">
+          <thead>
+            <tr>
+              <th>代码</th><th>名称</th><th>现价</th><th>涨幅%</th>
+              <th>量比</th><th>换手%</th><th>市值(亿)</th>
+              <th>振幅%</th><th>营收增%</th><th>净利增%</th><th>ROE%</th>
+            </tr>
+          </thead>
+          <tbody id="resultBody"></tbody>
+        </table>
+      </div>
+    </div>
+    </div><!-- end scanTab -->
+
+    <!-- 历史记录面板 -->
+    <div id="historyTab" style="display:none;">
+      <div class="panel">
+        <h3>历史选股记录</h3>
+        <div class="history-list" id="historyList">
+          <div class="empty-state">加载中...</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ========== 状态 ==========
+let presets = [];
+let currentStream = null;
+let defaultParams = {};
+
+// ========== 初始化 ==========
+let allPresets = [];
+
+async function init() {
+  try {
+    const res = await fetch('/api/presets');
+    allPresets = await res.json();
+    rebuildPresetDropdown();
+  } catch(e) { console.error('加载预设失败:', e); }
+
+  try {
+    const res = await fetch('/api/preset/builtin');
+    defaultParams = await res.json();
+  } catch(e) { console.error('加载默认参数失败:', e); }
+}
+init();
+
+function rebuildPresetDropdown() {
+  const sel = document.getElementById('presetSelect');
+  const currentVal = sel.value;
+  sel.innerHTML = '<option value="">-- 选择预设策略 --</option>';
+
+  const builtin = allPresets.filter(p => p.source === 'builtin');
+  const custom = allPresets.filter(p => p.source === 'custom');
+
+  if (builtin.length > 0) {
+    const g1 = document.createElement('optgroup');
+    g1.label = '内置策略';
+    builtin.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      g1.appendChild(opt);
+    });
+    sel.appendChild(g1);
+  }
+
+  if (custom.length > 0) {
+    const g2 = document.createElement('optgroup');
+    g2.label = '自定义策略';
+    custom.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = '📝 ' + p.name;
+      g2.appendChild(opt);
+    });
+    sel.appendChild(g2);
+  }
+
+  // 恢复选中值
+  if (currentVal) sel.value = currentVal;
+  updateCustomActions();
+}
+
+// ========== UI 辅助 ==========
+function syncVal(el, suffix, scale) {
+  suffix = suffix || '%';
+  scale = scale || 1;
+  let v = parseFloat(el.value);
+  if (scale !== 1) v = Math.round(v * 100);
+  document.getElementById(el.id + '_v').textContent = v + suffix;
+}
+
+function applyPreset() {
+  const id = document.getElementById('presetSelect').value;
+  if (!id) return;
+  fetch('/api/preset/' + id)
+    .then(r => r.json())
+    .then(params => {
+      Object.entries(params).forEach(([key, val]) => {
+        const el = document.getElementById(key);
+        if (!el) return;
+        if (el.type === 'checkbox') el.checked = val;
+        else if (el.type === 'range') { el.value = val; syncVal(el, '%', 1); }
+        else el.value = val;
+      });
+      ['near_52w_high'].forEach(k => {
+        const el = document.getElementById(k);
+        if (el) syncVal(el, '', 100);
+      });
+    });
+}
+
+function resetParams() {
+  if (!Object.keys(defaultParams).length) return;
+  Object.entries(defaultParams).forEach(([key, val]) => {
+    const el = document.getElementById(key);
+    if (!el) return;
+    if (el.type === 'checkbox') el.checked = val;
+    else if (el.type === 'range') {
+      el.value = val;
+      syncVal(el, el.id === 'near_52w_high' ? '' : '%', el.id === 'near_52w_high' ? 100 : 1);
+    } else el.value = val;
+  });
+  ['near_52w_high'].forEach(k => {
+    const el = document.getElementById(k);
+    if (el) syncVal(el, '', 100);
+  });
+}
+
+function onPresetChange() {
+  const id = document.getElementById('presetSelect').value;
+  updateCustomActions();
+  if (id) applyPreset();
+}
+
+function updateCustomActions() {
+  const id = document.getElementById('presetSelect').value;
+  const customActions = document.getElementById('customActions');
+  const isCustom = allPresets.some(p => p.id === id && p.source === 'custom');
+  if (isCustom) {
+    customActions.classList.add('visible');
+  } else {
+    customActions.classList.remove('visible');
+  }
+}
+
+// ========== 策略保存/编辑模态框 ==========
+function openSaveModal(mode) {
+  const sel = document.getElementById('presetSelect');
+  const currentId = sel.value;
+  const isCustom = allPresets.some(p => p.id === currentId && p.source === 'custom');
+
+  document.getElementById('saveModalTitle').textContent = (mode === 'edit' || isCustom)
+    ? '✏️ 更新自定义策略' : '💾 保存自定义策略';
+  document.getElementById('saveModalId').value = (isCustom || mode === 'edit') ? currentId : '';
+  document.getElementById('saveModalName').value = '';
+  document.getElementById('saveModalDesc').value = '';
+
+  if (isCustom || mode === 'edit') {
+    document.getElementById('saveModalId').readOnly = true;
+    // 预填当前策略名称
+    const preset = allPresets.find(p => p.id === currentId);
+    if (preset) {
+      document.getElementById('saveModalName').value = preset.name || '';
+      document.getElementById('saveModalDesc').value = preset.description || '';
+    }
+  } else {
+    document.getElementById('saveModalId').readOnly = false;
+  }
+
+  document.getElementById('saveModal').classList.add('open');
+}
+
+function closeSaveModal() {
+  document.getElementById('saveModal').classList.remove('open');
+}
+
+async function confirmSavePreset() {
+  const presetId = document.getElementById('saveModalId').value.trim();
+  const name = document.getElementById('saveModalName').value.trim();
+  const description = document.getElementById('saveModalDesc').value.trim();
+
+  if (!presetId || !name) {
+    alert('策略ID和策略名称不能为空');
+    return;
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(presetId)) {
+    alert('策略ID只能包含英文字母、数字、下划线和连字符');
+    return;
+  }
+
+  const params = collectParams();
+
+  try {
+    const res = await fetch('/api/presets/custom', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: presetId, name, description, params }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      closeSaveModal();
+      // 刷新预设列表
+      await refreshPresets();
+      document.getElementById('presetSelect').value = presetId;
+      updateCustomActions();
+      alert(data.is_new ? '策略已保存: ' + name : '策略已更新: ' + name);
+    } else {
+      alert('保存失败: ' + (data.error || '未知错误'));
+    }
+  } catch(e) {
+    alert('保存策略请求失败: ' + e.message);
+  }
+}
+
+// ========== 快捷更新当前策略 ==========
+async function quickUpdatePreset() {
+  const presetId = document.getElementById('presetSelect').value;
+  if (!presetId) return;
+  const preset = allPresets.find(p => p.id === presetId);
+  if (!preset || preset.source !== 'custom') return;
+
+  const params = collectParams();
+  try {
+    const res = await fetch('/api/presets/custom', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: presetId,
+        name: preset.name,
+        description: preset.description,
+        params,
+      }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      alert('策略已更新: ' + preset.name);
+    } else {
+      alert('更新失败: ' + (data.error || '未知错误'));
+    }
+  } catch(e) {
+    alert('更新策略请求失败: ' + e.message);
+  }
+}
+
+// ========== 删除当前策略 ==========
+async function deletePreset() {
+  const presetId = document.getElementById('presetSelect').value;
+  const preset = allPresets.find(p => p.id === presetId);
+  if (!preset || preset.source !== 'custom') return;
+
+  if (!confirm('确定要删除自定义策略 "' + preset.name + '" 吗？此操作不可撤销。')) return;
+
+  try {
+    const res = await fetch('/api/presets/custom/' + encodeURIComponent(presetId), {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById('presetSelect').value = '';
+      await refreshPresets();
+      updateCustomActions();
+      alert('已删除策略: ' + preset.name);
+    } else {
+      alert('删除失败: ' + (data.error || '未知错误'));
+    }
+  } catch(e) {
+    alert('删除策略请求失败: ' + e.message);
+  }
+}
+
+// ========== 复制策略 ==========
+function copyPreset() {
+  const presetId = document.getElementById('presetSelect').value;
+  const preset = allPresets.find(p => p.id === presetId);
+  if (!preset) return;
+
+  document.getElementById('copyModalId').value = '';
+  document.getElementById('copyModalName').value = preset.name + ' (副本)';
+  document.getElementById('copyModal').classList.add('open');
+}
+
+function closeCopyModal() {
+  document.getElementById('copyModal').classList.remove('open');
+}
+
+async function confirmCopyPreset() {
+  const newId = document.getElementById('copyModalId').value.trim();
+  const newName = document.getElementById('copyModalName').value.trim();
+  const sourceId = document.getElementById('presetSelect').value;
+
+  if (!newId || !newName) {
+    alert('新策略ID和名称不能为空');
+    return;
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(newId)) {
+    alert('策略ID只能包含英文字母、数字、下划线和连字符');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/presets/custom/copy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_id: sourceId, new_id: newId, new_name: newName }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      closeCopyModal();
+      await refreshPresets();
+      document.getElementById('presetSelect').value = newId;
+      updateCustomActions();
+      alert('策略已复制: ' + newName);
+    } else {
+      alert('复制失败: ' + (data.error || '未知错误'));
+    }
+  } catch(e) {
+    alert('复制策略请求失败: ' + e.message);
+  }
+}
+
+async function refreshPresets() {
+  try {
+    const res = await fetch('/api/presets');
+    allPresets = await res.json();
+    rebuildPresetDropdown();
+  } catch(e) { console.error('刷新预设列表失败:', e); }
+}
+
+function collectParams() {
+  const params = {};
+  document.querySelectorAll('#yangParams input, #sepaParams input').forEach(el => {
+    if (el.type === 'checkbox') params[el.id] = el.checked;
+    else if (el.type === 'range') params[el.id] = parseFloat(el.value);
+    else params[el.id] = parseFloat(el.value) || el.value;
+  });
+  return params;
+}
+
+function setStatus(state, text) {
+  const dot = document.getElementById('statusDot');
+  dot.className = 'status-dot ' + state;
+  document.getElementById('statusText').textContent = text;
+  document.getElementById('scanBtn').disabled = (state === 'running');
+}
+
+// ========== SSE 扫描 ==========
+async function startScan() {
+  if (currentStream) { try { currentStream.close(); } catch(e) {} currentStream = null; }
+
+  const params = collectParams();
+  lastScanParams = params;
+  const paramsJson = encodeURIComponent(JSON.stringify(params));
+  const streamId = Date.now().toString();
+
+  document.getElementById('stepList').innerHTML = '';
+  document.getElementById('resultTable').style.display = 'none';
+  document.getElementById('resultBody').innerHTML = '';
+  document.getElementById('summaryBar').style.display = 'none';
+  document.getElementById('warningBox').style.display = 'none';
+  document.getElementById('progressBar').style.display = 'block';
+  document.getElementById('progressFill').style.width = '0%';
+  document.getElementById('sumFinal').textContent = '0';
+  document.getElementById('sumYang').textContent = '0';
+
+  setStatus('running', '扫描中...');
+  addStepItem(null, '初始化', '正在启动扫描引擎...');
+
+  try {
+    const resp = await fetch('/api/scan/stream?params=' + paramsJson + '&id=' + streamId);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    currentStream = resp;
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let totalSteps = 0;
+
+    while (true) {
+      let result;
+      try { result = await reader.read(); } catch(e) { break; }
+      if (result.done) break;
+
+      buffer += decoder.decode(result.value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const part of parts) {
+        const lines = part.split('\n');
+        let event = 'message', dataStr = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) event = line.slice(7).trim();
+          else if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
+        }
+        if (!dataStr && event !== 'done') continue;
+
+        try {
+          const data = dataStr ? JSON.parse(dataStr) : {};
+          switch(event) {
+            case 'progress':
+              addStepItem(data.phase, data.label, `${data.after} 只`, data.filtered, data.stocks);
+              totalSteps++;
+              document.getElementById('progressFill').style.width = Math.min(95, totalSteps * 5) + '%';
+              break;
+            case 'result':
+              renderResults(data);
+              // 保存历史记录
+              saveScanHistory(data, lastScanParams);
+              document.getElementById('progressFill').style.width = '100%';
+              setStatus('done', '扫描完成');
+              break;
+            case 'done':
+              document.getElementById('progressFill').style.width = '100%';
+              setStatus('done', '扫描完成');
+              break;
+            case 'error':
+              addStepItem('错误', data.message, '', 0);
+              document.getElementById('warningBox').style.display = 'block';
+              document.getElementById('warningBox').textContent = '扫描错误: ' + data.message;
+              setStatus('idle', '就绪');
+              break;
+          }
+        } catch(e) { console.error('解析 SSE 失败:', e); }
+      }
+    }
+  } catch(e) {
+    console.error('扫描失败:', e);
+    addStepItem('错误', e.message, '', 0);
+    setStatus('idle', '就绪');
+  } finally {
+    currentStream = null;
+  }
+}
+
+function addStepItem(phase, label, count, filtered, stocks) {
+  const list = document.getElementById('stepList');
+  const empty = list.querySelector('.empty-state');
+  if (empty) empty.remove();
+
+  const hasStocks = stocks && stocks.length > 0;
+  const container = document.createElement('div');
+
+  const div = document.createElement('div');
+  div.className = 'step-item current' + (hasStocks ? ' has-stocks' : '');
+
+  const iconSpan = document.createElement('span');
+  iconSpan.className = 'toggle-icon';
+  iconSpan.textContent = hasStocks ? '▶' : '';
+
+  const phaseSpan = document.createElement('span');
+  phaseSpan.className = 'phase';
+  phaseSpan.textContent = phase || '';
+
+  const labelSpan = document.createElement('span');
+  labelSpan.className = 'label';
+  labelSpan.textContent = label;
+
+  const countSpan = document.createElement('span');
+  countSpan.className = 'count';
+  countSpan.textContent = count || '';
+
+  const filtSpan = document.createElement('span');
+  filtSpan.className = 'filtered';
+  filtSpan.textContent = filtered ? '-' + filtered : '';
+
+  div.appendChild(iconSpan);
+  div.appendChild(phaseSpan);
+  div.appendChild(labelSpan);
+  div.appendChild(countSpan);
+  div.appendChild(filtSpan);
+
+  container.appendChild(div);
+
+  // 可折叠的股票详情面板
+  if (hasStocks) {
+    const panel = document.createElement('div');
+    panel.className = 'stock-detail-panel';
+    panel.id = 'stockPanel_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+
+    let tbodyHtml = '';
+    stocks.forEach(s => {
+      const chg = (s.change_pct || 0);
+      const chgClass = chg > 0 ? 'positive' : 'negative';
+      tbodyHtml += `<tr>
+        <td><span class="code-link">${s.code||''}</span></td>
+        <td>${s.name||''}</td>
+        <td>${fmtNum(s.price)}</td>
+        <td class="${chgClass}">${chg>0?'+':''}${fmtNum(s.change_pct)}%</td>
+        <td>${fmtNum(s.volume_ratio)}</td>
+        <td>${fmtNum(s.turnover_rate)}%</td>
+        <td>${fmtNum(s.circ_mv_billion)}</td>
+        <td>${fmtNum(s.amplitude)}%</td>
+      </tr>`;
+    });
+
+    const stockCount = Math.min(stocks.length, 300);
+    panel.innerHTML = `<table>
+      <thead><tr>
+        <th>代码</th><th>名称</th><th>现价</th><th>涨幅%</th>
+        <th>量比</th><th>换手%</th><th>市值(亿)</th><th>振幅%</th>
+      </tr></thead>
+      <tbody>${tbodyHtml}</tbody>
+      ${stocks.length > 300 ? '<tfoot><tr><td colspan="8" style="text-align:center;color:var(--text2)">仅显示前300只，共' + stocks.length + '只</td></tr></tfoot>' : ''}
+    </table>`;
+
+    container.appendChild(panel);
+
+    div.addEventListener('click', function(e) {
+      e.stopPropagation();
+      const isOpen = panel.classList.toggle('open');
+      iconSpan.classList.toggle('open', isOpen);
+      iconSpan.textContent = isOpen ? '▼' : '▶';
+    });
+  }
+
+  list.appendChild(container);
+  list.scrollTop = list.scrollHeight;
+
+  setTimeout(() => div.classList.remove('current'), 200);
+}
+
+function renderResults(data) {
+  document.getElementById('resultTable').style.display = '';
+  document.getElementById('summaryBar').style.display = '';
+  document.getElementById('sumFinal').textContent = data.total_final || 0;
+  document.getElementById('sumYang').textContent = data.total_yang || 0;
+  document.getElementById('sumTime').textContent = data.scan_time || '--';
+
+  if (data.warning) {
+    document.getElementById('warningBox').style.display = 'block';
+    document.getElementById('warningBox').textContent = '⚠ ' + data.warning;
+  }
+
+  const candidates = data.final_candidates || [];
+  const tbody = document.getElementById('resultBody');
+  tbody.innerHTML = '';
+
+  if (candidates.length === 0) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="11" style="text-align:center;color:var(--text2)">无候选股通过筛选</td>';
+    tbody.appendChild(tr);
+    return;
+  }
+
+  candidates.forEach(c => {
+    const tr = document.createElement('tr');
+    const chg = (c.change_pct || 0);
+    const chgClass = chg > 0 ? 'positive' : 'negative';
+    tr.innerHTML = `
+      <td><a class="code-link" href="#" title="${c.name}">${c.code}</a></td>
+      <td>${c.name || ''}</td>
+      <td>${fmtNum(c.price)}</td>
+      <td class="${chgClass}">${chg > 0 ? '+' : ''}${fmtNum(c.change_pct)}%</td>
+      <td>${fmtNum(c.volume_ratio)}</td>
+      <td>${fmtNum(c.turnover_rate)}%</td>
+      <td>${fmtNum(c.circ_mv_billion)}</td>
+      <td>${fmtNum(c.amplitude)}%</td>
+      <td>${fmtNum(c.revenue_growth_yoy)}%</td>
+      <td>${fmtNum(c.profit_growth_yoy)}%</td>
+      <td>${fmtNum(c.roe)}%</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function fmtNum(v) {
+  if (v === null || v === undefined) return '--';
+  const n = Number(v);
+  if (isNaN(n)) return '--';
+  if (Number.isInteger(n)) return n.toString();
+  return n.toFixed(2);
+}
+
+// ========== 标签切换 ==========
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('scanTab').style.display = tab === 'scan' ? '' : 'none';
+  document.getElementById('historyTab').style.display = tab === 'history' ? '' : 'none';
+  if (tab === 'history') {
+    document.querySelector('.tab-btn:last-child').classList.add('active');
+    loadHistory();
+  } else {
+    document.querySelector('.tab-btn:first-child').classList.add('active');
+  }
+}
+
+// ========== 历史记录 ==========
+function saveScanHistory(result, params) {
+  const payload = {
+    scan_time: result.scan_time || new Date().toISOString(),
+    params: params,
+    total_yang: result.total_yang || 0,
+    total_final: result.total_final || 0,
+    yang_candidates: result.yang_candidates || [],
+    final_candidates: result.final_candidates || [],
+    filter_log: result.filter_log || [],
+    warning: result.warning || '',
+    preset: document.getElementById('presetSelect').value || 'custom',
+  };
+  fetch('/api/history/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(r => r.json()).then(d => {
+    console.log('历史记录已保存:', d.id);
+  }).catch(e => console.error('保存历史失败:', e));
+}
+
+async function loadHistory() {
+  const list = document.getElementById('historyList');
+  try {
+    const res = await fetch('/api/history');
+    const records = await res.json();
+    if (!records.length) {
+      list.innerHTML = '<div class="empty-state">暂无历史记录</div>';
+      return;
+    }
+    list.innerHTML = records.map(r => {
+      const yangCount = r.total_yang || 0;
+      const finalCount = r.total_final || 0;
+      const presetName = r.preset || 'custom';
+      const shortTime = (r.scan_time || '').slice(0, 19).replace('T', ' ');
+      return `<div class="history-item" onclick="toggleHistoryDetail(this, '${r.id}')">
+        <div class="h-header">
+          <span class="h-time">${shortTime}</span>
+          <span style="font-size:11px;color:var(--text2)">预设: ${presetName}</span>
+        </div>
+        <div class="h-summary">
+          杨永兴通过: <b style="color:var(--accent)">${yangCount}</b> 只 |
+          最终候选: <b style="color:var(--green)">${finalCount}</b> 只
+          ${r.warning ? ' | ⚠ ' + r.warning : ''}
+        </div>
+        <div class="h-detail" id="hdetail_${r.id}"></div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    list.innerHTML = '<div class="empty-state">加载历史记录失败: ' + e.message + '</div>';
+  }
+}
+
+async function toggleHistoryDetail(el, id) {
+  const detail = document.getElementById('hdetail_' + id);
+  if (detail.classList.contains('open')) {
+    detail.classList.remove('open');
+    return;
+  }
+  // 关闭其他
+  document.querySelectorAll('.h-detail.open').forEach(d => d.classList.remove('open'));
+
+  if (detail.innerHTML) {
+    detail.classList.add('open');
+    return;
+  }
+
+  // 加载详情
+  try {
+    const res = await fetch('/api/history/' + id);
+    const record = await res.json();
+    let html = '';
+
+    // 筛选日志
+    if (record.filter_log && record.filter_log.length > 0) {
+      html += '<div style="margin-bottom:8px;font-weight:600;color:var(--text2);">筛选日志:</div>';
+      html += '<table class="history-detail-table"><thead><tr><th>阶段</th><th>步骤</th><th>操作</th><th>前</th><th>后</th><th>过滤</th></tr></thead><tbody>';
+      record.filter_log.forEach(log => {
+        html += `<tr>
+          <td>${log.phase||'-'}</td>
+          <td>${log.step||'-'}</td>
+          <td style="text-align:left">${log.action||''}</td>
+          <td>${log.count_before||0}</td>
+          <td>${log.count_after||0}</td>
+          <td style="color:var(--red)">${log.filtered? '-'+log.filtered:''}</td>
+        </tr>`;
+      });
+      html += '</tbody></table>';
+    }
+
+    // 杨永兴候选
+    const yang = record.yang_candidates || [];
+    if (yang.length > 0) {
+      html += '<div style="margin:8px 0;font-weight:600;color:var(--purple);">杨永兴候选股:</div>';
+      html += '<table class="history-detail-table"><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>涨幅%</th><th>量比</th><th>换手%</th><th>市值(亿)</th></tr></thead><tbody>';
+      yang.forEach(c => {
+        html += `<tr><td>${c.code}</td><td>${c.name||''}</td><td>${fmtNum(c.price)}</td>
+          <td class="${(c.change_pct||0)>0?'positive':'negative'}">${fmtNum(c.change_pct)}%</td>
+          <td>${fmtNum(c.volume_ratio)}</td><td>${fmtNum(c.turnover_rate)}%</td><td>${fmtNum(c.circ_mv_billion)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
+
+    // 最终候选
+    const fin = record.final_candidates || [];
+    if (fin.length > 0) {
+      html += '<div style="margin:8px 0;font-weight:600;color:var(--green);">最终候选股:</div>';
+      html += '<table class="history-detail-table"><thead><tr><th>代码</th><th>名称</th><th>现价</th><th>涨幅%</th><th>营收增%</th><th>净利增%</th><th>ROE%</th></tr></thead><tbody>';
+      fin.forEach(c => {
+        html += `<tr><td>${c.code}</td><td>${c.name||''}</td><td>${fmtNum(c.price)}</td>
+          <td class="${(c.change_pct||0)>0?'positive':'negative'}">${fmtNum(c.change_pct)}%</td>
+          <td>${fmtNum(c.revenue_growth_yoy)}%</td><td>${fmtNum(c.profit_growth_yoy)}%</td><td>${fmtNum(c.roe)}%</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
+
+    // 参数
+    if (record.params) {
+      html += '<div class="history-params">参数: ';
+      const p = record.params;
+      html += `<span>涨幅${p.rise_min}-${p.rise_max}%</span>`;
+      html += `<span>市值${p.market_cap_min}-${p.market_cap_max}亿</span>`;
+      html += `<span>换手${p.turnover_min}-${p.turnover_max}%</span>`;
+      html += `<span>量比≥${p.volume_ratio_min}</span>`;
+      html += `<span>振幅≤${p.amplitude_max}%</span>`;
+      html += `<span>营收增≥${p.revenue_growth_min}%</span>`;
+      html += `<span>净利增≥${p.profit_growth_min}%</span>`;
+      html += `<span>ROE≥${p.roe_min}%</span>`;
+      html += '</div>';
+    }
+
+    detail.innerHTML = html;
+    detail.classList.add('open');
+  } catch(e) {
+    detail.innerHTML = '<div style="color:var(--red)">加载详情失败: ' + e.message + '</div>';
+    detail.classList.add('open');
+  }
+}
+
+// 保存最近一次扫描参数用于历史引用
+let lastScanParams = {};
+</script>
+
+<!-- 策略保存/编辑模态框 -->
+<div class="modal-overlay" id="saveModal">
+  <div class="modal-box">
+    <h3 id="saveModalTitle">💾 保存自定义策略</h3>
+    <label for="saveModalId">策略ID（英文标识）</label>
+    <input type="text" id="saveModalId" placeholder="例如: my_aggressive" pattern="[a-zA-Z0-9_-]+">
+    <label for="saveModalName">策略名称</label>
+    <input type="text" id="saveModalName" placeholder="例如: 我的激进策略">
+    <label for="saveModalDesc">策略描述（可选）</label>
+    <textarea id="saveModalDesc" placeholder="简短描述该策略的特点..."></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-cancel" onclick="closeSaveModal()">取消</button>
+      <button class="btn btn-confirm" onclick="confirmSavePreset()">确认保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 复制策略模态框 -->
+<div class="modal-overlay" id="copyModal">
+  <div class="modal-box">
+    <h3>📋 复制策略</h3>
+    <label for="copyModalId">新策略ID（英文标识）</label>
+    <input type="text" id="copyModalId" placeholder="例如: my_copy" pattern="[a-zA-Z0-9_-]+">
+    <label for="copyModalName">新策略名称</label>
+    <input type="text" id="copyModalName" placeholder="例如: 我的策略副本">
+    <div class="modal-actions">
+      <button class="btn btn-cancel" onclick="closeCopyModal()">取消</button>
+      <button class="btn btn-confirm" onclick="confirmCopyPreset()">确认复制</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

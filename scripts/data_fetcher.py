@@ -25,11 +25,30 @@ import logging
 import requests
 import json
 import re
+import os
 
 logger = logging.getLogger(__name__)
 
+# 股票代码列表缓存文件（避免因新浪API限流导致扫描失败）
+_CODE_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "code_list_cache.json")
 
-def _retry(func, retries=3, delay=2):
+
+def _call_with_timeout(func, timeout_sec=20):
+    """在线程中调用函数，超时返回 None，异常也会被捕获并记录"""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func)
+        try:
+            return future.result(timeout=timeout_sec)
+        except FuturesTimeout:
+            logger.warning(f"函数调用超时({timeout_sec}秒): {func}")
+            return None
+        except Exception as e:
+            logger.warning(f"函数调用异常: {e}")
+            return None
+
+
+def _retry(func, retries=3, delay=1):
     """带重试的函数调用"""
     for i in range(retries):
         try:
@@ -40,6 +59,96 @@ def _retry(func, retries=3, delay=2):
                 time.sleep(delay)
             else:
                 raise
+
+
+def _add_market_prefix(code: str) -> str:
+    """给纯数字代码添加市场前缀（用于腾讯接口查询）"""
+    code = str(code).strip()
+    if code.startswith(("sh", "sz", "bj")):
+        return code
+    if code.startswith(("60", "68")):
+        return f"sh{code}"
+    if code.startswith("30"):
+        return f"sz{code}"
+    if code.startswith(("8", "4", "920")):
+        return f"bj{code}"
+    return f"sz{code}"  # 其余归为深市
+
+
+def _load_code_list_cache():
+    """加载缓存的股票代码列表"""
+    try:
+        if os.path.exists(_CODE_CACHE_PATH):
+            with open(_CODE_CACHE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            codes = data.get("codes", [])
+            if codes:
+                logger.info(f"从缓存加载股票代码列表: {len(codes)} 只")
+                return codes
+    except Exception as e:
+        logger.warning(f"加载代码缓存失败: {e}")
+    return []
+
+
+def _save_code_list_cache(codes: list):
+    """保存股票代码列表到缓存"""
+    try:
+        os.makedirs(os.path.dirname(_CODE_CACHE_PATH), exist_ok=True)
+        with open(_CODE_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "codes": codes,
+                "updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "count": len(codes),
+            }, f, ensure_ascii=False)
+        logger.info(f"股票代码列表缓存已更新: {len(codes)} 只")
+    except Exception as e:
+        logger.warning(f"保存代码缓存失败: {e}")
+
+
+def _get_stock_code_list():
+    """
+    获取A股代码列表（含市场前缀），多源降级：
+    1. ak.stock_info_a_code_name() — 10秒，非Sina源
+    2. ak.stock_zh_a_spot() — Sina源（可能被限流）
+    3. 本地JSON缓存 — 最终兜底
+    """
+    raw_codes = []
+
+    # 方案1: stock_info_a_code_name（非Sina源，更稳定）
+    try:
+        code_df = _call_with_timeout(lambda: ak.stock_info_a_code_name(), timeout_sec=15)
+        if code_df is not None and not code_df.empty:
+            for _, row in code_df.iterrows():
+                raw_code = str(row["code"]).strip()
+                if len(raw_code) == 6 and raw_code.isdigit():
+                    raw_codes.append(_add_market_prefix(raw_code))
+            if raw_codes:
+                logger.info(f"stock_info_a_code_name 获取成功: {len(raw_codes)} 只")
+                _save_code_list_cache(raw_codes)
+                return raw_codes
+    except Exception as e:
+        logger.warning(f"stock_info_a_code_name 失败: {e}")
+
+    # 方案2: stock_zh_a_spot（Sina源，带重试和超时）
+    try:
+        code_df = _call_with_timeout(
+            lambda: _retry(lambda: ak.stock_zh_a_spot()), timeout_sec=25
+        )
+        if code_df is not None and not code_df.empty and "代码" in code_df.columns:
+            raw_codes = code_df["代码"].astype(str).tolist()
+            if raw_codes:
+                logger.info(f"stock_zh_a_spot 获取成功: {len(raw_codes)} 只")
+                _save_code_list_cache(raw_codes)
+                return raw_codes
+    except Exception as e:
+        logger.warning(f"stock_zh_a_spot 失败: {e}")
+
+    # 方案3: 缓存兜底
+    cached = _load_code_list_cache()
+    if cached:
+        return cached
+
+    return raw_codes
 
 
 # ============ 大盘数据 ============
@@ -162,9 +271,12 @@ def get_realtime_quotes():
     except Exception as e:
         logger.warning(f"腾讯行情接口失败: {e}")
 
-    # 尝试方案2：新浪数据（列较少，但稳定性好）
+    # 尝试方案2：新浪数据（列较少，但稳定性好，带30秒超时）
     try:
-        df = _retry(lambda: ak.stock_zh_a_spot())
+        df = _call_with_timeout(
+            lambda: _retry(lambda: ak.stock_zh_a_spot()),
+            timeout_sec=30,
+        )
         if df is not None and not df.empty:
             return _normalize_quotes_sina(df)
     except Exception as e:
@@ -178,21 +290,12 @@ def _get_realtime_quotes_tencent():
     """
     通过腾讯股票接口(qt.gtimg.cn)获取全市场实时行情
     步骤：
-      1. 用akshare新浪接口获取股票代码列表（含sh/sz/bj前缀）
+      1. 多源获取股票代码列表（stock_info_a_code_name → stock_zh_a_spot → 缓存）
       2. 分批调用腾讯接口获取实时行情
     优点：全市场约3秒，比东方财富/新浪快5-10倍，且更稳定
     """
-    # 第一步：获取股票代码列表
-    try:
-        code_df = _retry(lambda: ak.stock_zh_a_spot())
-    except Exception:
-        code_df = None
-
-    if code_df is None or code_df.empty:
-        return pd.DataFrame()
-
-    # 获取带市场前缀的代码列表（sh600000/sz000001/bj830000）
-    raw_codes = code_df["代码"].astype(str).tolist() if "代码" in code_df.columns else []
+    # 第一步：获取股票代码列表（多源降级 + 缓存兜底）
+    raw_codes = _get_stock_code_list()
     if not raw_codes:
         return pd.DataFrame()
 
@@ -323,45 +426,62 @@ def get_limit_up_history(days=20, target_codes=None):
     """
     获取近N天的涨停股票记录
     如果指定target_codes，只检查这些股票；否则用腾讯实时行情中的高涨幅股票近似判断
+    使用线程池并发获取K线数据，大幅提升速度
     返回 dict: { 日期: [股票代码列表] }
     """
     try:
         result = {}
 
         if target_codes:
-            # 只检查指定股票的日K线
-            for code in target_codes:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _check_one(code):
+                """检查单只股票是否有涨停历史，返回 (code, date_strs) 或 None"""
                 try:
                     df = get_stock_kline(code, days=days + 5)
                     if df is None or df.empty:
-                        continue
+                        return None
 
-                    # 涨跌幅需要自行计算（腾讯K线不提供change_pct）
                     df = df.sort_values("date", ascending=True)
-                    if "close" in df.columns and len(df) > 1:
-                        df["pct"] = df["close"].pct_change() * 100
-                        recent = df.tail(days + 2)
-                        for _, row in recent.iterrows():
-                            pct = row.get("pct", None)
-                            if pd.notna(pct) and pct >= 9.8:
-                                date_val = row.get("date", "")
-                                if date_val:
-                                    date_str = str(date_val).replace("-", "")[:8]
-                                    if date_str not in result:
-                                        result[date_str] = []
-                                    result[date_str].append(code)
+                    if "close" not in df.columns or len(df) <= 1:
+                        return None
+
+                    df["pct"] = df["close"].pct_change() * 100
+                    recent = df.tail(days + 2)
+                    hit_dates = []
+                    for _, row in recent.iterrows():
+                        pct = row.get("pct", None)
+                        if pd.notna(pct) and pct >= 9.8:
+                            date_val = row.get("date", "")
+                            if date_val:
+                                hit_dates.append(str(date_val).replace("-", "")[:8])
+                    if hit_dates:
+                        return (code, hit_dates)
                 except Exception:
-                    continue
+                    pass
+                return None
+
+            # 并发获取K线（最多20个并发，避免被封）
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                future_to_code = {executor.submit(_check_one, code): code for code in target_codes}
+                for future in as_completed(future_to_code):
+                    res = future.result()
+                    if res:
+                        code, dates = res
+                        for d in dates:
+                            if d not in result:
+                                result[d] = []
+                            result[d].append(code)
+
             return result
 
         # 没有指定目标代码时，用实时行情中涨幅较高的股票近似判断
-        # 获取实时行情中涨幅>5%的股票，这些更有可能有涨停历史
         try:
             quotes = get_realtime_quotes()
             if quotes is not None and not quotes.empty and "change_pct" in quotes.columns:
                 high_change = quotes[quotes["change_pct"] >= 5.0]
                 if "code" in high_change.columns:
-                    target_codes = high_change["code"].tolist()[:100]  # 取涨幅最大的100只
+                    target_codes = high_change["code"].tolist()[:100]
                     return get_limit_up_history(days=days, target_codes=target_codes)
         except Exception:
             pass
@@ -517,8 +637,8 @@ def get_stock_kline(code, days=30):
     try:
         prefix = _get_market_prefix(code)
         symbol = f"{prefix}{code}"
-        df = _retry(lambda s=symbol: ak.stock_zh_a_daily(symbol=s, adjust="qfq"))
-        if df is not None and not df.empty:
+        df = _retry(lambda s=symbol: ak.stock_zh_a_daily(symbol=s, adjust="qfq"), retries=2, delay=1)
+        if df is not None and not df.empty and "date" in df.columns:
             df = df.sort_values("date", ascending=False).head(days)
             return df
     except Exception as e:
@@ -551,7 +671,11 @@ def _get_stock_kline_tencent(code, days=30):
     if not klines:
         return pd.DataFrame()
 
-    df = pd.DataFrame(klines, columns=["date", "open", "close", "high", "low", "volume"])
+    # 腾讯K线可能返回6列(date,open,close,high,low,volume)或7列(含amount)
+    col_names = ["date", "open", "close", "high", "low", "volume"]
+    if klines and len(klines[0]) > 6:
+        col_names = col_names[:1] + ["open", "close", "high", "low", "volume", "amount"]
+    df = pd.DataFrame(klines, columns=col_names)
     for col in ["open", "close", "high", "low", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -563,12 +687,14 @@ def _get_stock_kline_tencent(code, days=30):
 def _get_market_prefix(code):
     """根据股票代码判断市场前缀（sh/sz/bj）"""
     code = str(code)
-    if code.startswith("6") or code.startswith("9"):
+    if code.startswith("920"):  # 北交所920系列（需在9之前判断）
+        return "bj"
+    elif code.startswith("6") or code.startswith("9"):
         return "sh"  # 沪市主板/科创板
     elif code.startswith("0") or code.startswith("3"):
         return "sz"  # 深市主板/创业板
     elif code.startswith("8") or code.startswith("4"):
-        return "bj"  # 北交所
+        return "bj"  # 北交所82/83/87/88系列
     else:
         return "sz"  # 默认深市
 

@@ -31,20 +31,12 @@
 
 import logging
 import datetime
-import time
 import math
 import pandas as pd
 import numpy as np
-from config import (
-    SEPA_REVENUE_GROWTH_MIN, SEPA_PROFIT_GROWTH_MIN, SEPA_ROE_MIN,
-    SEPA_PROFIT_CAGR_MIN, SEPA_LISTING_MIN_DAYS, SEPA_MA_SHORT, SEPA_MA_LONG,
-    SEPA_VOL_SHORT, SEPA_VOL_LONG,
-    RISE_MIN, RISE_MAX, MARKET_CAP_MIN, MARKET_CAP_MAX,
-    TURNOVER_MIN, TURNOVER_MAX, VOLUME_RATIO_MIN, AMPLITUDE_MAX,
-    LIMIT_UP_DAYS,
-)
 from sepa_filter import SEPAFilter
 from scanner import Scanner, is_st_stock
+from scan_params import ScanParams
 import data_fetcher as df_api
 from openviking_adapter import OpenVikingAdapter
 
@@ -71,14 +63,13 @@ class CombinedScanner:
             "reason": reason,
         })
 
-    def scan(self, skip_intraday=False, skip_ma_check=False, relax_yang=False):
+    def scan(self, params=None, progress_callback=None):
         """
         执行杨永兴+SEPA联合扫描（顺序：杨永兴先 → SEPA后）
 
         参数:
-          skip_intraday: 跳过杨永兴分时数据检查（加快速度）
-          skip_ma_check: 跳过SEPA均线和量能检查（加快速度）
-          relax_yang: 放宽杨永兴条件（涨幅不限、市值/换手率放宽）
+          params: ScanParams 对象，为 None 时使用默认值
+          progress_callback: 进度回调 fn(phase, step, label, before, after)
 
         返回: {
             yang_candidates: list,      # 杨永兴技术面通过的候选股
@@ -89,6 +80,7 @@ class CombinedScanner:
             strategy: str,
         }
         """
+        p = params if params is not None else ScanParams()
         self.filter_log = []
         yang_candidates = []
 
@@ -97,20 +89,22 @@ class CombinedScanner:
         logger.info("第一阶段：杨永兴九步技术面筛选")
         logger.info("=" * 60)
 
-        yang_result = self.scanner.scan(skip_intraday=skip_intraday)
-        yang_candidates = yang_result.get("candidates", [])
-        yang_codes = set(c["code"] for c in yang_candidates)
-
-        for log in self.scanner.filter_log:
+        def _yang_progress(step, label, before, after, stocks_list=None):
             self.filter_log.append({
                 "phase": "杨永兴",
-                "step": log.get("step"),
-                "action": log.get("action"),
-                "count_before": log.get("count_before", 0),
-                "count_after": log.get("count_after", 0),
-                "filtered": log.get("filtered", 0),
-                "reason": log.get("reason", ""),
+                "step": step,
+                "action": label,
+                "count_before": before,
+                "count_after": after,
+                "filtered": before - after,
+                "reason": "",
             })
+            if progress_callback:
+                progress_callback("杨永兴", step, label, before, after, stocks_list)
+
+        yang_result = self.scanner.scan(params=p, progress_callback=_yang_progress)
+        yang_candidates = yang_result.get("candidates", [])
+        yang_codes = set(c["code"] for c in yang_candidates)
 
         logger.info(f"杨永兴筛选完成: {len(yang_candidates)} 只候选股")
 
@@ -119,7 +113,7 @@ class CombinedScanner:
             return self._build_result([], [], {}, {}, "杨永兴筛选无候选股")
 
         # ============ 大盘环境判断（放量大跌则直接结束）============
-        market_status = df_api.get_market_status()
+        market_status = yang_result.get("market", {})
         market_trend = df_api.get_market_trend()
 
         if market_status.get("is_crash"):
@@ -132,20 +126,26 @@ class CombinedScanner:
         logger.info("=" * 60)
 
         # SEPA只对杨永兴候选股进行财务验证
-        sepa_result = self.sepa_filter.scan(
-            target_codes=list(yang_codes),
-            skip_ma_check=skip_ma_check,
-        )
-
-        for log in self.sepa_filter.filter_log:
+        def _sepa_progress(step, label, before, after, stocks_list=None):
             self.filter_log.append({
                 "phase": "SEPA",
-                "step": log.get("step"),
-                "action": log.get("action"),
-                "count_before": log.get("count_before", 0),
-                "count_after": log.get("count_after", 0),
-                "filtered": log.get("filtered", 0),
+                "step": step,
+                "action": label,
+                "count_before": before,
+                "count_after": after,
+                "filtered": before - after,
             })
+            if progress_callback:
+                progress_callback("SEPA", step, label, before, after, stocks_list)
+
+        # 用杨永兴候选股构建 DataFrame，避免重复调用行情API
+        yang_df = pd.DataFrame(yang_candidates)
+        sepa_result = self.sepa_filter.scan(
+            target_codes=list(yang_codes),
+            params=p,
+            progress_callback=_sepa_progress,
+            target_stocks=yang_df,
+        )
 
         sepa_candidates = sepa_result.get("candidates", [])
         logger.info(f"SEPA验证完成: {len(sepa_candidates)} 只候选股通过")
@@ -174,88 +174,6 @@ class CombinedScanner:
             logger.info("📋 扫描结果已同步到OpenViking上下文数据库")
 
         return result
-
-    def _filter_kline_pressure(self, stocks):
-        """K线形态过滤：高位长上影线剔除"""
-        result_codes = []
-        for _, row in stocks.iterrows():
-            code = row["code"]
-            try:
-                kline = df_api.get_stock_kline(code, days=20)
-                if kline.empty or len(kline) < 5:
-                    result_codes.append(code)
-                    continue
-                recent = kline.head(5)
-                has_long_shadow = False
-                for _, krow in recent.iterrows():
-                    if pd.notna(krow.get("high")) and pd.notna(krow.get("close")):
-                        upper_shadow = (krow["high"] - krow["close"]) / krow["close"]
-                        if upper_shadow > 0.03:
-                            has_long_shadow = True
-                            break
-                if not has_long_shadow:
-                    result_codes.append(code)
-            except Exception:
-                result_codes.append(code)
-            time.sleep(0.2)
-        return stocks[stocks["code"].isin(result_codes)].copy()
-
-    def _filter_intraday(self, stocks):
-        """分时数据过滤：全天站均价线上方"""
-        result_codes = []
-        for _, row in stocks.iterrows():
-            code = row["code"]
-            try:
-                intraday = df_api.get_intraday_data(code)
-                if intraday.get("above_avg") is True or intraday.get("above_avg") is None:
-                    result_codes.append(code)
-            except Exception:
-                result_codes.append(code)
-        return stocks[stocks["code"].isin(result_codes)].copy()
-
-    def _log_remaining_steps(self, start_step):
-        """记录未执行的步骤"""
-        step_names = {
-            2: f"近{LIMIT_UP_DAYS}天有涨停", 3: f"量比≥{VOLUME_RATIO_MIN}",
-            4: f"流通市值{MARKET_CAP_MIN}-{MARKET_CAP_MAX}亿",
-            5: f"换手率{TURNOVER_MIN}-{TURNOVER_MAX}%", 6: f"振幅≤{AMPLITUDE_MAX}%",
-            7: "K线上方无压力", 8: "分时站均价线上方",
-        }
-        for step in range(start_step, 9):
-            self.log_filter("杨永兴", step, f"{step_names.get(step, '')}（前置淘汰）", 0, 0)
-
-    def _build_candidates(self, stocks, financial_cache):
-        """构建候选股列表（含SEPA基本面+杨永兴技术面数据）"""
-        candidates = []
-        for _, row in stocks.iterrows():
-            code = str(row.get("code", ""))
-            financial = financial_cache.get(code, {})
-
-            def _float(val):
-                try:
-                    v = float(val)
-                    return v if not (math.isnan(v) or math.isinf(v)) else None
-                except:
-                    return None
-
-            candidate = {
-                "code": code,
-                "name": str(row.get("name", "")),
-                "price": _float(row.get("price")),
-                "change_pct": _float(row.get("change_pct")),
-                # SEPA基本面
-                "revenue_growth_yoy": financial.get("revenue_growth_yoy"),
-                "profit_growth_yoy": financial.get("profit_growth_yoy"),
-                "roe": financial.get("roe"),
-                # 杨永兴技术面
-                "volume_ratio": _float(row.get("volume_ratio")),
-                "turnover_rate": _float(row.get("turnover_rate")),
-                "circ_mv_billion": _float(row.get("circ_mv_billion")),
-                "amplitude": _float(row.get("amplitude")),
-                "pe": _float(row.get("pe")),
-            }
-            candidates.append(candidate)
-        return candidates
 
     def _build_result(self, final_candidates, yang_candidates,
                       market=None, market_status=None, warning=""):

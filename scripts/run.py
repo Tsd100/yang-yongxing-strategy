@@ -73,9 +73,9 @@ def cmd_combined_scan(args):
     """执行杨永兴+SEPA联合选股扫描（先杨永兴技术面筛选，再SEPA基本面验证）"""
     from combined_scanner import CombinedScanner
     from openviking_adapter import init_openviking
+    from scan_params import ScanParams, get_preset
     from report import generate_combined_report
 
-    skip_ma = "--skip-ma" in args
     skip_intraday = "--skip-intraday" in args or "-s" in args
     relax = "--relax" in args or "-r" in args
     use_openviking = "--openviking" in args or "-o" in args
@@ -83,16 +83,19 @@ def cmd_combined_scan(args):
     # 初始化 OpenViking
     ov = init_openviking(enabled=use_openviking)
 
+    # 构建参数
+    if relax:
+        params = get_preset("relaxed")
+    else:
+        params = ScanParams()
+    params.skip_intraday = skip_intraday
+
     logger.info("🚀 开始杨永兴+SEPA联合选股扫描...")
     if ov.available:
         logger.info("📋 OpenViking 上下文管理已启用")
 
     scanner = CombinedScanner(openviking=ov)
-    result = scanner.scan(
-        skip_intraday=skip_intraday,
-        skip_ma_check=skip_ma,
-        relax_yang=relax,
-    )
+    result = scanner.scan(params=params)
 
     report_text, filepath = generate_combined_report(result)
     print(report_text)

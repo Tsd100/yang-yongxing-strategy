@@ -21,6 +21,7 @@ from config import (
     TURNOVER_MIN, TURNOVER_MAX, VOLUME_RATIO_MIN, AMPLITUDE_MAX,
     LIMIT_UP_DAYS, MAIN_BOARD_ONLY, STOP_LOSS, FORCE_STOP_LOSS,
 )
+from scan_params import ScanParams
 import data_fetcher as df_api
 
 logger = logging.getLogger(__name__)
@@ -30,14 +31,13 @@ def is_main_board(code):
     """判断是否为主板股票"""
     if not MAIN_BOARD_ONLY:
         return True
-    # 排除: 科创板688, 北交所8/4开头, 创业板300
+    # 排除: 科创板688, 北交所8/4/920开头, 创业板300/301
     if code.startswith("688"):  # 科创板
         return False
-    if code.startswith(("8", "4")):  # 北交所
+    if code.startswith(("8", "4", "920")):  # 北交所（82/83/87/88/920）
         return False
-    if code.startswith("300"):  # 创业板
+    if code.startswith(("300", "301")):  # 创业板
         return False
-    # 排除ST
     return True
 
 
@@ -46,6 +46,25 @@ def is_st_stock(name):
     if not name:
         return False
     return "ST" in name or "*ST" in name
+
+
+def _stocks_to_list(stocks_df):
+    """将股票DataFrame转为简洁的dict列表，用于进度回传"""
+    if stocks_df is None or stocks_df.empty:
+        return []
+    cols = ["code", "name", "price", "change_pct", "volume_ratio",
+            "turnover_rate", "circ_mv_billion", "amplitude"]
+    available = [c for c in cols if c in stocks_df.columns]
+    records = stocks_df[available].head(300).copy()
+    # 统一类型，避免JSON序列化问题
+    for c in records.columns:
+        if c == "code" or c == "name":
+            records[c] = records[c].astype(str)
+        else:
+            records[c] = records[c].apply(
+                lambda x: round(float(x), 2) if pd.notna(x) and x is not None else None
+            )
+    return records.to_dict(orient="records")
 
 
 class Scanner:
@@ -65,13 +84,23 @@ class Scanner:
             "reason": reason,
         })
 
-    def scan(self, skip_intraday=False):
+    def scan(self, skip_intraday=False, params=None, progress_callback=None):
         """
         执行完整九步筛选
-        参数 skip_intraday: 跳过分时数据检查（分时数据获取慢，可先跑前8步）
+        参数:
+          skip_intraday: 跳过分时数据检查
+          params: ScanParams 对象，为 None 时使用 config.py 默认值
+          progress_callback: 进度回调 fn(step, label, before, after, stocks_df)
         返回: { candidates: list, market: dict, filter_log: list }
         """
+        p = params if params is not None else ScanParams()
         self.filter_log = []
+
+        def _report(step, label, before, after, stocks_df=None):
+            self.log_filter(step, label, before, after)
+            if progress_callback:
+                stock_list = _stocks_to_list(stocks_df)
+                progress_callback(step, label, before, after, stock_list)
 
         # ============ 步骤0：大盘环境判断 ============
         logger.info("===== 步骤0：大盘环境判断 =====")
@@ -80,6 +109,8 @@ class Scanner:
 
         if market_status.get("is_crash"):
             logger.warning("⚠️ 大盘放量大跌，今日不操作！")
+            if progress_callback:
+                progress_callback(0, "大盘放量大跌，空仓", 0, 0, None)
             return {
                 "candidates": [],
                 "market": {**market_status, **market_trend},
@@ -89,138 +120,144 @@ class Scanner:
 
         # ============ 步骤1：获取全市场行情 ============
         logger.info("===== 步骤1：获取全市场实时行情 =====")
+        if progress_callback:
+            progress_callback(1, "正在获取全市场实时行情...", 0, 0, None)
         all_stocks = df_api.get_realtime_quotes()
         if all_stocks.empty:
             logger.error("无法获取行情数据")
+            if progress_callback:
+                progress_callback(1, "行情获取失败", 0, 0, None)
             return {"candidates": [], "market": market_trend, "filter_log": self.filter_log}
 
         total = len(all_stocks)
         logger.info(f"全市场共 {total} 只股票")
+        if progress_callback:
+            progress_callback(1, f"获取全市场实时行情", total, total, None)
 
-        # 排除非主板（ST排除留给SEPA步骤1，这里只过滤板块）
-        all_stocks["is_main"] = all_stocks["code"].apply(is_main_board)
-        stocks = all_stocks[all_stocks["is_main"]].copy()
-        self.log_filter(1, "排除非主板（科创板/北交所/创业板）", total, len(stocks))
+        if p.main_board_only:
+            all_stocks["is_main"] = all_stocks["code"].apply(is_main_board)
+            stocks = all_stocks[all_stocks["is_main"]].copy()
+        else:
+            stocks = all_stocks.copy()
+        _report(1, "排除非主板/全板块", total, len(stocks), stocks)
 
-        # ============ 步骤2：涨幅范围 3%-5% ============
-        logger.info("===== 步骤2：涨幅范围 3%-5% =====")
+        # ============ 步骤2：涨幅范围 ============
+        logger.info(f"===== 步骤2：涨幅范围 {p.rise_min}%-{p.rise_max}% =====")
         before = len(stocks)
         stocks = stocks[
-            (stocks["change_pct"] >= RISE_MIN) & (stocks["change_pct"] <= RISE_MAX)
+            (stocks["change_pct"] >= p.rise_min) & (stocks["change_pct"] <= p.rise_max)
         ].copy()
-        self.log_filter(2, f"涨幅{RISE_MIN}%-{RISE_MAX}%", before, len(stocks))
+        _report(2, f"涨幅{p.rise_min}%-{p.rise_max}%", before, len(stocks), stocks)
         logger.info(f"剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks, market_trend)
 
-        # ============ 步骤3：近20天有涨停记录 ============
+        # ============ 步骤3：涨停基因 ============
         logger.info("===== 步骤3：涨停基因筛选 =====")
+        if progress_callback:
+            progress_callback(3, f"涨停基因筛选(近{p.limit_up_days}天)...", 0, 0, None)
         before = len(stocks)
 
-        # 获取涨停历史（只检查当前候选股，提高效率）
         candidate_codes = stocks["code"].tolist() if "code" in stocks.columns else []
-        self.limit_up_cache = df_api.get_limit_up_history(days=LIMIT_UP_DAYS, target_codes=candidate_codes)
+        self.limit_up_cache = df_api.get_limit_up_history(days=p.limit_up_days, target_codes=candidate_codes)
         limit_up_codes = set()
         for codes in self.limit_up_cache.values():
             limit_up_codes.update(codes)
 
-        # 也加上今日涨停
         today_limit = df_api.get_limit_up_today()
         limit_up_codes.update(today_limit)
 
         stocks = stocks[stocks["code"].isin(limit_up_codes)].copy()
-        self.log_filter(3, f"近{LIMIT_UP_DAYS}天有涨停", before, len(stocks))
+        _report(3, f"近{p.limit_up_days}天有涨停", before, len(stocks), stocks)
         logger.info(f"剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks, market_trend)
 
-        # ============ 步骤4：量比 ≥ 1 ============
+        # ============ 步骤4：量比 ============
         logger.info("===== 步骤4：量比筛选 =====")
         before = len(stocks)
         if "volume_ratio" in stocks.columns and stocks["volume_ratio"].notna().any():
-            # 有量比数据时正常过滤，NaN的保留
-            mask = (stocks["volume_ratio"] >= VOLUME_RATIO_MIN) | stocks["volume_ratio"].isna()
+            mask = (stocks["volume_ratio"] >= p.volume_ratio_min) | stocks["volume_ratio"].isna()
             stocks = stocks[mask].copy()
-            self.log_filter(4, f"量比≥{VOLUME_RATIO_MIN}（含NaN保留）", before, len(stocks))
+            _report(4, f"量比≥{p.volume_ratio_min}", before, len(stocks), stocks)
         else:
-            self.log_filter(4, "量比数据缺失，跳过", before, len(stocks))
+            _report(4, "量比数据缺失，跳过", before, len(stocks), stocks)
         logger.info(f"剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks, market_trend)
 
-        # ============ 步骤5：流通市值 50-200亿 ============
+        # ============ 步骤5：流通市值 ============
         logger.info("===== 步骤5：流通市值筛选 =====")
         before = len(stocks)
         if "circ_mv_billion" in stocks.columns and stocks["circ_mv_billion"].notna().any():
             mask = (
-                (stocks["circ_mv_billion"] >= MARKET_CAP_MIN) &
-                (stocks["circ_mv_billion"] <= MARKET_CAP_MAX)
+                (stocks["circ_mv_billion"] >= p.market_cap_min) &
+                (stocks["circ_mv_billion"] <= p.market_cap_max)
             ) | stocks["circ_mv_billion"].isna()
             stocks = stocks[mask].copy()
-        self.log_filter(5, f"流通市值{MARKET_CAP_MIN}-{MARKET_CAP_MAX}亿", before, len(stocks))
+        _report(5, f"流通市值{p.market_cap_min}-{p.market_cap_max}亿", before, len(stocks), stocks)
         logger.info(f"剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks, market_trend)
 
-        # ============ 步骤6：换手率 5%-10% ============
+        # ============ 步骤6：换手率 ============
         logger.info("===== 步骤6：换手率筛选 =====")
         before = len(stocks)
         if "turnover_rate" in stocks.columns and stocks["turnover_rate"].notna().any():
             mask = (
-                (stocks["turnover_rate"] >= TURNOVER_MIN) &
-                (stocks["turnover_rate"] <= TURNOVER_MAX)
+                (stocks["turnover_rate"] >= p.turnover_min) &
+                (stocks["turnover_rate"] <= p.turnover_max)
             ) | stocks["turnover_rate"].isna()
             stocks = stocks[mask].copy()
-            self.log_filter(6, f"换手率{TURNOVER_MIN}-{TURNOVER_MAX}%（含NaN保留）", before, len(stocks))
+            _report(6, f"换手率{p.turnover_min}-{p.turnover_max}%", before, len(stocks), stocks)
         else:
-            self.log_filter(6, "换手率数据缺失，跳过", before, len(stocks))
+            _report(6, "换手率数据缺失，跳过", before, len(stocks), stocks)
         logger.info(f"剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks, market_trend)
 
-        # ============ 步骤7：成交量稳定放大筛选 ============
+        # ============ 步骤7：振幅 ============
         logger.info("===== 步骤7：成交量稳定放大筛选 =====")
         before = len(stocks)
-        # 杨永兴原文：把成交量忽高忽低的删掉，只留下成交量温和放大的
-        # 当前实现：振幅过滤（振幅过大=波动风险高），成交量稳定性需历史数据暂用振幅替代
         if "amplitude" in stocks.columns:
-            stocks = stocks[stocks["amplitude"] <= AMPLITUDE_MAX].copy()
-            self.log_filter(7, f"成交量温和放大（振幅≤{AMPLITUDE_MAX}%）", before, len(stocks))
+            stocks = stocks[stocks["amplitude"] <= p.amplitude_max].copy()
+            _report(7, f"振幅≤{p.amplitude_max}%", before, len(stocks), stocks)
         else:
-            self.log_filter(7, "振幅数据缺失，跳过", before, len(stocks))
+            _report(7, "振幅数据缺失，跳过", before, len(stocks), stocks)
         logger.info(f"剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks, market_trend)
 
-        # ============ 步骤8：K线形态上方无压力 ============
+        # ============ 步骤8：K线形态 ============
         logger.info("===== 步骤8：K线形态筛选 =====")
         before = len(stocks)
-        stocks = self._filter_kline_pressure(stocks)
-        self.log_filter(8, "K线上方无压力", before, len(stocks))
+        stocks = self._filter_kline_pressure(stocks, shadow_threshold=p.kline_shadow_max)
+        _report(8, f"K线上方无压力(上影线<{p.kline_shadow_max}%)", before, len(stocks), stocks)
         logger.info(f"剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks, market_trend)
 
-        # ============ 步骤9：分时站均价线上方 ============
-        if not skip_intraday:
+        # ============ 步骤9：分时均价线 ============
+        if not skip_intraday and not p.skip_intraday:
             logger.info("===== 步骤9：分时均价线筛选 =====")
             before = len(stocks)
             stocks = self._filter_intraday(stocks)
-            self.log_filter(9, "分时站均价线上方", before, len(stocks))
+            _report(9, "分时站均价线上方", before, len(stocks), stocks)
             logger.info(f"剩余 {len(stocks)} 只")
 
         return self._build_result(stocks, market_trend)
 
-    def _filter_kline_pressure(self, stocks):
-        """K线形态过滤：高位长上影线或短期支撑不明显的剔除"""
+    def _filter_kline_pressure(self, stocks, shadow_threshold=3.0):
+        """K线形态过滤：高位长上影线剔除，阈值可配置"""
         result_codes = []
+        threshold = shadow_threshold / 100.0  # 百分比转小数
 
         for _, row in stocks.iterrows():
             code = row["code"]
@@ -230,13 +267,12 @@ class Scanner:
                     result_codes.append(code)
                     continue
 
-                # 检查近5日是否有长上影线（最高价远高于收盘价）
                 recent = kline.head(5)
                 has_long_shadow = False
                 for _, krow in recent.iterrows():
-                    if pd.notna(krow.get("high")) and pd.notna(krow.get("close")):
+                    if pd.notna(krow.get("high")) and pd.notna(krow.get("close")) and krow["close"] > 0:
                         upper_shadow = (krow["high"] - krow["close"]) / krow["close"]
-                        if upper_shadow > 0.03:  # 上影线超过3%
+                        if upper_shadow > threshold:
                             has_long_shadow = True
                             break
 
@@ -244,7 +280,6 @@ class Scanner:
                     result_codes.append(code)
 
             except Exception:
-                # 获取K线失败的暂时保留
                 result_codes.append(code)
 
         return stocks[stocks["code"].isin(result_codes)].copy()

@@ -23,21 +23,15 @@ import time
 import math
 import pandas as pd
 import numpy as np
-from config import (
-    SEPA_REVENUE_GROWTH_MIN, SEPA_PROFIT_GROWTH_MIN, SEPA_ROE_MIN,
-    SEPA_PROFIT_CAGR_MIN, SEPA_LISTING_MIN_DAYS, SEPA_MA_SHORT, SEPA_MA_LONG,
-    SEPA_VOL_SHORT, SEPA_VOL_LONG,
-)
 import data_fetcher as df_api
+from scan_params import ScanParams
+from scanner import _stocks_to_list
 
 logger = logging.getLogger(__name__)
 
-# VCP紧凑收盘参数
+# VCP紧凑收盘固定参数（窗口天数不变）
 VCP_PRICE_RANGE_DAYS = 10
-VCP_PRICE_RANGE_MAX = 8.0
 VCP_CLOSE_STD_DAYS = 5
-VCP_CLOSE_STD_MAX = 2.0
-NEAR_52WEEK_HIGH_MAX = 0.85
 
 
 class SEPAFilter:
@@ -55,24 +49,42 @@ class SEPAFilter:
             "filtered": count_before - count_after, "reason": reason,
         })
 
-    def scan(self, target_codes=None, skip_ma_check=False):
+    def scan(self, target_codes=None, skip_ma_check=False, params=None, progress_callback=None, target_stocks=None):
         """
         执行SEPA九步筛选
         参数:
           target_codes: 杨永兴候选股代码列表（联合扫描时传入）
           skip_ma_check: 跳过均线和量能检查（加快速度）
+          params: ScanParams 对象，为 None 时使用默认值
+          progress_callback: 进度回调 fn(step, label, before, after)
+          target_stocks: 直接传入 DataFrame（无需重复获取行情）
         返回: { candidates: list, filter_log: list }
         """
+        p = params if params is not None else ScanParams()
+        self.p = p  # 供辅助方法使用
         self.filter_log = []
         self._financial_cache = {}
         self._ths_rank_cache = None
 
-        if target_codes:
+        def _report(step, label, before, after, stocks_df=None):
+            self.log_filter(step, label, before, after)
+            if progress_callback:
+                stock_list = _stocks_to_list(stocks_df)
+                progress_callback(step, label, before, after, stock_list)
+
+        if target_stocks is not None and not target_stocks.empty:
+            stocks = target_stocks.copy()
+            logger.info(f"SEPA验证模式（直接传入）：共 {len(stocks)} 只杨永兴候选股待验证")
+        elif target_codes:
             all_stocks = df_api.get_realtime_quotes()
             if not all_stocks.empty and "code" in all_stocks.columns:
                 stocks = all_stocks[all_stocks["code"].isin(target_codes)].copy()
             else:
-                stocks = pd.DataFrame({"code": target_codes})
+                stocks = pd.DataFrame({"code": list(target_codes)})
+            # 确保必需列存在（步骤1需要name，步骤6-8需要price）
+            for col, default in [("name", ""), ("price", 0.0), ("change_pct", 0.0)]:
+                if col not in stocks.columns:
+                    stocks[col] = default
             logger.info(f"SEPA验证模式：共 {len(target_codes)} 只杨永兴候选股待验证")
         else:
             all_stocks = df_api.get_realtime_quotes()
@@ -95,7 +107,7 @@ class SEPAFilter:
         before = len(stocks)
         stocks = stocks[~stocks["name"].apply(self._is_st)].copy()
         stocks = stocks[stocks["code"].apply(self._is_not_sub_new)].copy()
-        self.log_filter(1, "剔除ST和次新股(上市<1年)", before, len(stocks))
+        _report(1, "剔除ST和次新股(上市<1年)", before, len(stocks), stocks)
         logger.info(f"步骤1后剩余 {len(stocks)} 只")
 
         if stocks.empty:
@@ -106,84 +118,84 @@ class SEPAFilter:
         codes_to_check = stocks["code"].tolist()
         financial_data = self._batch_get_financial_indicators(codes_to_check)
 
-        # 步骤2：营收同比增长 > 25%
+        # 步骤2：营收同比增长
         before_2 = len(stocks)
-        codes_pass = self._filter_by_revenue_growth(financial_data, SEPA_REVENUE_GROWTH_MIN)
+        codes_pass = self._filter_by_revenue_growth(financial_data, p.revenue_growth_min)
         stocks = stocks[stocks["code"].isin(codes_pass)].copy()
-        self.log_filter(2, f"营收同比增长>{SEPA_REVENUE_GROWTH_MIN}%", before_2, len(stocks))
+        _report(2, f"营收同比增长>{p.revenue_growth_min}%", before_2, len(stocks), stocks)
         logger.info(f"步骤2后剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks)
 
-        # 步骤3：净利润同比增长 > 30% 且EPS加速
+        # 步骤3：净利润同比增长 且EPS加速
         before_3 = len(stocks)
-        codes_pass = self._filter_by_eps_acceleration(financial_data, SEPA_PROFIT_GROWTH_MIN)
+        codes_pass = self._filter_by_eps_acceleration(financial_data, p.profit_growth_min)
         stocks = stocks[stocks["code"].isin(codes_pass)].copy()
-        self.log_filter(3, f"净利润同比增长>{SEPA_PROFIT_GROWTH_MIN}%且EPS逐季加速", before_3, len(stocks))
+        _report(3, f"净利润同比增长>{p.profit_growth_min}%且EPS逐季加速", before_3, len(stocks), stocks)
         logger.info(f"步骤3后剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks)
 
-        # 步骤4：年度ROE > SEPA_ROE_MIN（取最新年报ROE，接近TTM年化口径）
+        # 步骤4：年度ROE（取最新年报ROE，接近TTM年化口径）
         before_4 = len(stocks)
-        codes_pass = self._filter_by_annual_roe(financial_data, SEPA_ROE_MIN)
+        codes_pass = self._filter_by_annual_roe(financial_data, p.roe_min)
         stocks = stocks[stocks["code"].isin(codes_pass)].copy()
-        self.log_filter(4, f"年度ROE>{SEPA_ROE_MIN}%（年报口径）", before_4, len(stocks))
+        _report(4, f"年度ROE>{p.roe_min}%（年报口径）", before_4, len(stocks), stocks)
         logger.info(f"步骤4后剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks)
 
-        # 步骤5：近3年净利润CAGR > 20%
+        # 步骤5：近3年净利润CAGR
         before_5 = len(stocks)
-        codes_pass = self._filter_by_profit_cagr(stocks["code"].tolist(), SEPA_PROFIT_CAGR_MIN)
+        codes_pass = self._filter_by_profit_cagr(stocks["code"].tolist(), p.profit_cagr_min)
         stocks = stocks[stocks["code"].isin(codes_pass)].copy()
-        self.log_filter(5, f"近3年净利润CAGR>{SEPA_PROFIT_CAGR_MIN}%", before_5, len(stocks))
+        _report(5, f"近3年净利润CAGR>{p.profit_cagr_min}%", before_5, len(stocks), stocks)
         logger.info(f"步骤5后剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks)
 
         # ============ 步骤6-7：技术面筛选 ============
-        if not skip_ma_check:
-            logger.info("===== SEPA步骤6：股价在50日/150日均线之上 =====")
+        if not skip_ma_check and not p.skip_ma_check:
+            logger.info("===== SEPA步骤6：股价在均线之上 =====")
             before_6 = len(stocks)
             stocks = self._filter_by_ma(stocks)
-            self.log_filter(6, f"股价在MA{SEPA_MA_SHORT}/MA{SEPA_MA_LONG}之上", before_6, len(stocks))
+            _report(6, f"股价在MA{p.ma_short}/MA{p.ma_long}之上", before_6, len(stocks), stocks)
             logger.info(f"步骤6后剩余 {len(stocks)} 只")
 
             if stocks.empty:
                 return self._build_result(stocks)
 
-            logger.info("===== SEPA步骤7：近期放量（10日均量>120日均量）=====")
+            logger.info("===== SEPA步骤7：近期放量 =====")
             before_7 = len(stocks)
             stocks = self._filter_by_volume_ratio(stocks)
-            self.log_filter(7, f"近{SEPA_VOL_SHORT}日均量>{SEPA_VOL_LONG}日均量", before_7, len(stocks))
+            _report(7, f"近{p.vol_short}日均量>{p.vol_long}日均量", before_7, len(stocks), stocks)
             logger.info(f"步骤7后剩余 {len(stocks)} 只")
 
             if stocks.empty:
                 return self._build_result(stocks)
         else:
-            self.log_filter(6, f"股价在MA{SEPA_MA_SHORT}/MA{SEPA_MA_LONG}之上（跳过）", len(stocks), len(stocks))
-            self.log_filter(7, f"近{SEPA_VOL_SHORT}日均量>{SEPA_VOL_LONG}日均量（跳过）", len(stocks), len(stocks))
+            _report(6, f"股价在MA{p.ma_short}/MA{p.ma_long}之上（跳过）", len(stocks), len(stocks), stocks)
+            _report(7, f"近{p.vol_short}日均量>{p.vol_long}日均量（跳过）", len(stocks), len(stocks), stocks)
 
         # ============ 步骤8：52周前期高点 ============
-        logger.info("===== SEPA步骤8：股价接近52周前期高点（>85%）======")
+        logger.info("===== SEPA步骤8：股价接近52周前期高点 =====")
         before_8 = len(stocks)
         stocks = self._filter_by_52week_high(stocks)
-        self.log_filter(8, f"股价>52周高点×{NEAR_52WEEK_HIGH_MAX:.0%}", before_8, len(stocks))
+        _report(8, f"股价>52周高点×{p.near_52w_high:.0%}", before_8, len(stocks), stocks)
         logger.info(f"步骤8后剩余 {len(stocks)} 只")
 
         if stocks.empty:
             return self._build_result(stocks)
 
         # ============ 步骤9：VCP紧凑收盘 ============
-        logger.info("===== SEPA步骤9：VCP紧凑收盘（振幅<8% + 收盘价稳定）======")
+        logger.info("===== SEPA步骤9：VCP紧凑收盘 =====")
         before_9 = len(stocks)
         stocks = self._filter_by_vcp_tight_close(stocks)
-        self.log_filter(9, f"10日振幅<{VCP_PRICE_RANGE_MAX}%且5日收盘价稳定", before_9, len(stocks))
+        _report(9, f"10日振幅<{p.vcp_range_max}%且5日收盘价稳定", before_9, len(stocks), stocks)
         logger.info(f"步骤9后剩余 {len(stocks)} 只")
 
         return self._build_result(stocks)
@@ -453,8 +465,9 @@ class SEPAFilter:
             return None
 
     def _filter_by_52week_high(self, stocks):
-        """步骤8：股价 > 52周前期高点 × 85%"""
+        """步骤8：股价 > 52周前期高点 × near_52w_high"""
         result_codes = []
+        threshold = self.p.near_52w_high
 
         for _, row in stocks.iterrows():
             code = str(row.get("code", "")).zfill(6)
@@ -473,7 +486,7 @@ class SEPAFilter:
                 prev_high_val = float(prev_high)
                 if prev_high_val > 0:
                     ratio = price / prev_high_val
-                    if ratio >= NEAR_52WEEK_HIGH_MAX:
+                    if ratio >= threshold:
                         result_codes.append(code)
                 else:
                     result_codes.append(code)
@@ -499,7 +512,7 @@ class SEPAFilter:
                 kline["low"] = pd.to_numeric(kline["low"], errors="coerce")
                 kline["close"] = pd.to_numeric(kline["close"], errors="coerce")
 
-                # 条件1：10日振幅 < 8%
+                # 条件1：10日振幅 < vcp_range_max
                 recent_10 = kline.tail(VCP_PRICE_RANGE_DAYS)
                 highs = recent_10["high"].dropna()
                 lows = recent_10["low"].dropna()
@@ -508,10 +521,10 @@ class SEPAFilter:
                     period_low = lows.min()
                     if period_low > 0:
                         price_range_pct = (period_high - period_low) / period_low * 100
-                        if price_range_pct >= VCP_PRICE_RANGE_MAX:
+                        if price_range_pct >= self.p.vcp_range_max:
                             continue
 
-                # 条件2：5日收盘价稳定（标准差/均值 < 2%）
+                # 条件2：5日收盘价稳定（标准差/均值 < vcp_close_std_max）
                 recent_5 = kline.tail(VCP_CLOSE_STD_DAYS)["close"].dropna()
                 if len(recent_5) < VCP_CLOSE_STD_DAYS:
                     result_codes.append(code)
@@ -521,7 +534,7 @@ class SEPAFilter:
                 close_std = recent_5.std(ddof=0)
                 if close_mean > 0:
                     cv = close_std / close_mean * 100
-                    if cv < VCP_CLOSE_STD_MAX:
+                    if cv < self.p.vcp_close_std_max:
                         result_codes.append(code)
                 else:
                     result_codes.append(code)
@@ -534,8 +547,10 @@ class SEPAFilter:
         return stocks[stocks["code"].str.zfill(6).isin(result_codes)].copy()
 
     def _filter_by_ma(self, stocks):
-        """筛选股价在50日和150日均线之上"""
+        """筛选股价在短期和长期均线之上"""
         result_codes = []
+        ma_short = self.p.ma_short
+        ma_long = self.p.ma_long
 
         for _, row in stocks.iterrows():
             code = row["code"]
@@ -546,14 +561,14 @@ class SEPAFilter:
                 continue
 
             try:
-                kline = df_api.get_stock_kline(code, days=200)
-                if kline.empty or len(kline) < SEPA_MA_LONG:
+                kline = df_api.get_stock_kline(code, days=max(200, ma_long + 10))
+                if kline.empty or len(kline) < ma_long:
                     result_codes.append(code)
                     continue
 
                 kline = kline.sort_values("date", ascending=True)
-                kline["ma_short"] = kline["close"].rolling(SEPA_MA_SHORT).mean()
-                kline["ma_long"] = kline["close"].rolling(SEPA_MA_LONG).mean()
+                kline["ma_short"] = kline["close"].rolling(ma_short).mean()
+                kline["ma_long"] = kline["close"].rolling(ma_long).mean()
 
                 latest = kline.iloc[-1]
                 ma_short = latest.get("ma_short")
@@ -572,22 +587,24 @@ class SEPAFilter:
         return stocks[stocks["code"].isin(result_codes)].copy()
 
     def _filter_by_volume_ratio(self, stocks):
-        """筛选近期放量：10日均量 > 120日均量"""
+        """筛选近期放量：短期均量 > 长期均量"""
         result_codes = []
+        vol_short_n = self.p.vol_short
+        vol_long_n = self.p.vol_long
 
         for _, row in stocks.iterrows():
             code = row["code"]
             try:
-                kline = df_api.get_stock_kline(code, days=150)
-                if kline.empty or len(kline) < SEPA_VOL_LONG:
+                kline = df_api.get_stock_kline(code, days=max(150, vol_long_n + 10))
+                if kline.empty or len(kline) < vol_long_n:
                     result_codes.append(code)
                     continue
 
                 kline = kline.sort_values("date", ascending=True)
                 kline["volume"] = pd.to_numeric(kline["volume"], errors="coerce")
 
-                vol_short = kline.tail(SEPA_VOL_SHORT)["volume"].mean()
-                vol_long = kline.tail(SEPA_VOL_LONG)["volume"].mean()
+                vol_short = kline.tail(vol_short_n)["volume"].mean()
+                vol_long = kline.tail(vol_long_n)["volume"].mean()
 
                 if pd.notna(vol_short) and pd.notna(vol_long) and vol_long > 0:
                     if vol_short > vol_long:
