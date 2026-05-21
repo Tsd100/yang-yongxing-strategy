@@ -9,7 +9,7 @@
 - 日K线数据
 
 数据源优先级（已移除东方财富，避免频繁限流/封禁）：
-  实时行情：腾讯(qt.gtimg.cn) > 新浪(stock_zh_a_spot)
+  实时的行情：腾讯(qt.gtimg.cn) > 新浪(stock_zh_a_spot)
   日K线：  腾讯(web.ifzq.gtimg.cn) > 新浪(stock_zh_a_daily)
   基本信息：腾讯(交易所代码列表) > 新浪(stock_zh_a_spot)
   涨停数据：腾讯实时行情筛选(涨幅≥9.8%) > 新浪日K筛选
