@@ -144,6 +144,6 @@ yang-yongxing-strategy/
 
 ## 开源协议
 
-MIT License -  详 见 [LICENSE](LICENSE)
+MIT License -  详见1 [LICENSE](LICENSE)
 
 ⚠️ 免责声明：本工具仅供学习研究使用，不构成任何投资建议。股市有风险，投资需谨慎。使用者应自行承担因使用本工具而产生的任何风险和损失。
