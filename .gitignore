@@ -9,6 +9,9 @@ build/
 
 # Runtime data
 scripts/data/reports/*.json
+scripts/data/code_list_cache.json
+scripts/data/custom_presets.json
+scripts/data/history/
 
 # OS
 .DS_Store

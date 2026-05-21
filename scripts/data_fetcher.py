@@ -336,19 +336,20 @@ def _get_realtime_quotes_tencent():
                         "low": _safe_float(fields[34]) if len(fields) > 34 else None,     # 最低
                         "change_pct": _safe_float(fields[32]) if len(fields) > 32 else None,  # 涨跌幅%
                         "change_amt": _safe_float(fields[31]) if len(fields) > 31 else None,  # 涨跌额
-                        "amplitude": None,           # 振幅（需计算）
+                        "amplitude": None,           # 振幅（优先API字段，兜底计算）
                         "volume_ratio": _safe_float(fields[49]) if len(fields) > 49 else None,  # 量比
-                        "turnover_rate": None,       # 换手率（需计算）
+                        "turnover_rate": _safe_float(fields[38]) if len(fields) > 38 else None,  # 换手率
                         "circ_mv": _safe_float(fields[44]) * 1e8 if len(fields) > 44 and _safe_float(fields[44]) else None,  # 流通市值
                         "total_mv": _safe_float(fields[45]) * 1e8 if len(fields) > 45 and _safe_float(fields[45]) else None,  # 总市值
                         "pe": _safe_float(fields[39]) if len(fields) > 39 else None,  # 市盈率
                         "pb": None,                  # 市净率
                     }
-                    # 计算振幅
-                    if stock["high"] and stock["low"] and stock["pre_close"] and stock["pre_close"] > 0:
+                    # 振幅：优先用API字段[43]，兜底根据最高/最低/昨收计算
+                    amp_api = _safe_float(fields[43]) if len(fields) > 43 else None
+                    if amp_api is not None:
+                        stock["amplitude"] = amp_api
+                    elif stock["high"] and stock["low"] and stock["pre_close"] and stock["pre_close"] > 0:
                         stock["amplitude"] = round((stock["high"] - stock["low"]) / stock["pre_close"] * 100, 2)
-                    # 换手率
-                    stock["turnover_rate"] = _safe_float(fields[43]) if len(fields) > 43 else None
                     # 流通市值（亿元）
                     stock["circ_mv_billion"] = stock["circ_mv"] / 1e8 if stock["circ_mv"] else None
 
